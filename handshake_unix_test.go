@@ -4,7 +4,7 @@
 
 //go:build unix
 
-package tls
+package restls
 
 import (
 	"errors"
