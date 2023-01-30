@@ -115,6 +115,10 @@ type Conn struct {
 	activeCall int32
 
 	tmp [16]byte
+
+	tls12PubKey []byte
+
+	eagerEcdheParameters *ecdheParameters
 }
 
 // Access to net.Conn methods.

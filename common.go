@@ -734,6 +734,12 @@ type Config struct {
 	// autoSessionTicketKeys is like sessionTicketKeys but is owned by the
 	// auto-rotation logic. See Config.ticketKeys.
 	autoSessionTicketKeys []ticketKey
+
+	RestlsSecret []byte
+
+	VersionHint uint8
+
+	CurveIDHint CurveID
 }
 
 const (
@@ -814,6 +820,9 @@ func (c *Config) Clone() *Config {
 		KeyLogWriter:                c.KeyLogWriter,
 		sessionTicketKeys:           c.sessionTicketKeys,
 		autoSessionTicketKeys:       c.autoSessionTicketKeys,
+		CurveIDHint:                 c.CurveIDHint,
+		VersionHint:                 c.VersionHint,
+		RestlsSecret:                c.RestlsSecret,
 	}
 }
 
@@ -1483,3 +1492,14 @@ func isSupportedSignatureAlgorithm(sigAlg SignatureScheme, supportedSignatureAlg
 	}
 	return false
 }
+
+const (
+	TLS12Hint uint8 = 12
+	TLS13Hint uint8 = 13
+)
+
+const (
+	restlsMACLength                uint = 16
+	restls12SessionTicketMACOffset uint = 16
+	restls12PubKeyMACOffset        uint = 0
+)

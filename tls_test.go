@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"internal/testenv"
 	"io"
 	"math"
 	"net"
@@ -22,6 +21,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rogpeppe/go-internal/testenv"
 )
 
 var rsaCertPEM = `-----BEGIN CERTIFICATE-----
@@ -827,6 +828,12 @@ func TestCloneNonFuncFields(t *testing.T) {
 			f.Set(reflect.ValueOf(RenegotiateOnceAsClient))
 		case "mutex", "autoSessionTicketKeys", "sessionTicketKeys":
 			continue // these are unexported fields that are handled separately
+		case "RestlsSecret":
+			f.Set(reflect.ValueOf([]byte{'1', '2', '3', '4', '5'}))
+		case "VersionHint":
+			f.Set(reflect.ValueOf((uint8(TLS12Hint))))
+		case "CurveIDHint":
+			f.Set(reflect.ValueOf(CurveID(CurveP256)))
 		default:
 			t.Errorf("all fields must be accounted for, but saw unknown field %q", fn)
 		}

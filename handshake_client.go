@@ -146,6 +146,29 @@ func (c *Conn) makeClientHello() (*clientHelloMsg, ecdheParameters, error) {
 	return hello, params, nil
 }
 
+func (c *Conn) generateSessionIDFromKeyShare(ctx context.Context, hello *clientHelloMsg) {
+	if c.config.VersionHint != TLS13Hint {
+		panic("session id should only be generated from key share for TLS 1.3")
+	}
+	hmac := macSHA1(c.config.RestlsSecret)
+	hmac.Write(hello.keyShares[0].data)
+
+}
+func (c *Conn) generateSessionIDFromPKnTicket(ctx context.Context, hello *clientHelloMsg) {
+	if c.config.VersionHint != TLS12Hint {
+		panic("session id should only be generated from pub key and session ticket for TLS 1.2")
+	}
+	hmac := macSHA1(c.config.RestlsSecret)
+	hmac.Write(c.tls12PubKey)
+	copy(hello.sessionId[restls12PubKeyMACOffset:], hmac.Sum(nil)[:restlsMACLength])
+	if len(hello.sessionTicket) > 0 {
+		hmac := macSHA1(c.config.RestlsSecret)
+		hmac.Write(hello.sessionTicket)
+		copy(hello.sessionId[restls12SessionTicketMACOffset:], hmac.Sum(nil)[:restlsMACLength])
+	}
+	fmt.Printf("generateSessionIDFromPKnTicket %v", hello.sessionId)
+}
+
 func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 	if c.config == nil {
 		c.config = defaultConfig()
@@ -161,6 +184,9 @@ func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 	}
 	c.serverName = hello.serverName
 
+	if c.config.VersionHint == TLS13Hint {
+		c.generateSessionIDFromKeyShare(ctx, hello)
+	}
 	cacheKey, session, earlySecret, binderKey := c.loadSession(hello)
 	if cacheKey != "" && session != nil {
 		defer func() {
@@ -174,6 +200,17 @@ func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 				c.config.ClientSessionCache.Put(cacheKey, nil)
 			}
 		}()
+	}
+
+	if c.config.VersionHint == TLS12Hint {
+		params, err := generateECDHEParameters(c.config.rand(), c.config.CurveIDHint)
+		if err != nil {
+			return fmt.Errorf("tls: CurvePreferences includes unsupported curve: %v", err)
+		}
+		c.tls12PubKey = params.PublicKey()
+		fmt.Printf("c.tls12PubKey %v", c.tls12PubKey)
+		c.eagerEcdheParameters = &params
+		c.generateSessionIDFromPKnTicket(ctx, hello)
 	}
 
 	if _, err := c.writeRecord(recordTypeHandshake, hello.marshal()); err != nil {
@@ -535,7 +572,7 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 	skx, ok := msg.(*serverKeyExchangeMsg)
 	if ok {
 		hs.finishedHash.Write(skx.marshal())
-		err = keyAgreement.processServerKeyExchange(c.config, hs.hello, hs.serverHello, c.peerCertificates[0], skx)
+		err = keyAgreement.processServerKeyExchange(c.config, hs.hello, hs.serverHello, c.peerCertificates[0], skx, c.eagerEcdheParameters, c.tls12PubKey)
 		if err != nil {
 			c.sendAlert(alertUnexpectedMessage)
 			return err

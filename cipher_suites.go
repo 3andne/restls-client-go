@@ -15,8 +15,9 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"hash"
-	"internal/cpu"
 	"runtime"
+
+	"golang.org/x/sys/cpu"
 
 	"golang.org/x/crypto/chacha20poly1305"
 )
