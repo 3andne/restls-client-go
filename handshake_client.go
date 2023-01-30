@@ -146,15 +146,19 @@ func (c *Conn) makeClientHello() (*clientHelloMsg, ecdheParameters, error) {
 	return hello, params, nil
 }
 
-func (c *Conn) generateSessionIDFromKeyShare(ctx context.Context, hello *clientHelloMsg) {
+func (c *Conn) generateSessionIDForTLS13(hello *clientHelloMsg) {
 	if c.config.VersionHint != TLS13Hint {
 		panic("session id should only be generated from key share for TLS 1.3")
 	}
 	hmac := macSHA1(c.config.RestlsSecret)
 	hmac.Write(hello.keyShares[0].data)
-
+	for _, psk := range hello.pskIdentities {
+		hmac.Write(psk.label)
+	}
+	copy(hello.sessionId, hmac.Sum(nil)[:restlsMACLength])
 }
-func (c *Conn) generateSessionIDFromPKnTicket(ctx context.Context, hello *clientHelloMsg) {
+
+func (c *Conn) generateSessionIDFromPKnTicket(hello *clientHelloMsg) {
 	if c.config.VersionHint != TLS12Hint {
 		panic("session id should only be generated from pub key and session ticket for TLS 1.2")
 	}
@@ -185,7 +189,7 @@ func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 	c.serverName = hello.serverName
 
 	if c.config.VersionHint == TLS13Hint {
-		c.generateSessionIDFromKeyShare(ctx, hello)
+		c.generateSessionIDForTLS13(hello)
 	}
 	cacheKey, session, earlySecret, binderKey := c.loadSession(hello)
 	if cacheKey != "" && session != nil {
@@ -210,14 +214,14 @@ func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 		c.tls12PubKey = params.PublicKey()
 		fmt.Printf("c.tls12PubKey %v", c.tls12PubKey)
 		c.eagerEcdheParameters = &params
-		c.generateSessionIDFromPKnTicket(ctx, hello)
+		c.generateSessionIDFromPKnTicket(hello)
 	}
 
 	if _, err := c.writeRecord(recordTypeHandshake, hello.marshal()); err != nil {
 		return err
 	}
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(false)
 	if err != nil {
 		return err
 	}
@@ -244,6 +248,7 @@ func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 		return errors.New("tls: downgrade attempt detected, possibly due to a MitM attack or a broken middlebox")
 	}
 
+	c.serverRandom = serverHello.random
 	if c.vers == VersionTLS13 {
 		hs := &clientHandshakeStateTLS13{
 			c:           c,
@@ -383,7 +388,9 @@ func (c *Conn) loadSession(hello *clientHelloMsg) (cacheKey string,
 	}
 	hello.pskIdentities = []pskIdentity{identity}
 	hello.pskBinders = [][]byte{make([]byte, cipherSuite.hash.Size())}
-
+	if c.config.VersionHint == TLS13Hint {
+		c.generateSessionIDForTLS13(hello)
+	}
 	// Compute the PSK binders. See RFC 8446, Section 4.2.11.2.
 	psk := cipherSuite.expandLabel(session.masterSecret, "resumption",
 		session.nonce, cipherSuite.hash.Size())
@@ -509,7 +516,7 @@ func (hs *clientHandshakeState) pickCipherSuite() error {
 func (hs *clientHandshakeState) doFullHandshake() error {
 	c := hs.c
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(false)
 	if err != nil {
 		return err
 	}
@@ -520,7 +527,7 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 	}
 	hs.finishedHash.Write(certMsg.marshal())
 
-	msg, err = c.readHandshake()
+	msg, err = c.readHandshake(false)
 	if err != nil {
 		return err
 	}
@@ -542,7 +549,7 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 
 		c.ocspResponse = cs.response
 
-		msg, err = c.readHandshake()
+		msg, err = c.readHandshake(false)
 		if err != nil {
 			return err
 		}
@@ -578,7 +585,7 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 			return err
 		}
 
-		msg, err = c.readHandshake()
+		msg, err = c.readHandshake(false)
 		if err != nil {
 			return err
 		}
@@ -597,7 +604,7 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 			return err
 		}
 
-		msg, err = c.readHandshake()
+		msg, err = c.readHandshake(false)
 		if err != nil {
 			return err
 		}
@@ -812,7 +819,7 @@ func (hs *clientHandshakeState) readFinished(out []byte) error {
 		return err
 	}
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(true)
 	if err != nil {
 		return err
 	}
@@ -839,7 +846,7 @@ func (hs *clientHandshakeState) readSessionTicket() error {
 	}
 
 	c := hs.c
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(false)
 	if err != nil {
 		return err
 	}

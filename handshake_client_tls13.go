@@ -268,7 +268,7 @@ func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 		return err
 	}
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(false)
 	if err != nil {
 		return err
 	}
@@ -279,6 +279,7 @@ func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 		return unexpectedMessageError(serverHello, msg)
 	}
 	hs.serverHello = serverHello
+	c.serverRandom = serverHello.random
 
 	if err := hs.checkServerHelloOrHRR(); err != nil {
 		return err
@@ -387,7 +388,7 @@ func (hs *clientHandshakeStateTLS13) establishHandshakeKeys() error {
 func (hs *clientHandshakeStateTLS13) readServerParameters() error {
 	c := hs.c
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(true)
 	if err != nil {
 		return err
 	}
@@ -426,7 +427,7 @@ func (hs *clientHandshakeStateTLS13) readServerCertificate() error {
 		return nil
 	}
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(false)
 	if err != nil {
 		return err
 	}
@@ -437,7 +438,7 @@ func (hs *clientHandshakeStateTLS13) readServerCertificate() error {
 
 		hs.certReq = certReq
 
-		msg, err = c.readHandshake()
+		msg, err = c.readHandshake(false)
 		if err != nil {
 			return err
 		}
@@ -461,7 +462,7 @@ func (hs *clientHandshakeStateTLS13) readServerCertificate() error {
 		return err
 	}
 
-	msg, err = c.readHandshake()
+	msg, err = c.readHandshake(false)
 	if err != nil {
 		return err
 	}
@@ -500,7 +501,7 @@ func (hs *clientHandshakeStateTLS13) readServerCertificate() error {
 func (hs *clientHandshakeStateTLS13) readServerFinished() error {
 	c := hs.c
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(false)
 	if err != nil {
 		return err
 	}

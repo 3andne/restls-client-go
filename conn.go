@@ -119,6 +119,10 @@ type Conn struct {
 	tls12PubKey []byte
 
 	eagerEcdheParameters *ecdheParameters
+
+	serverRandom []byte
+
+	restlsAuthed bool
 }
 
 // Access to net.Conn methods.
@@ -581,12 +585,21 @@ func (c *Conn) newRecordHeaderError(conn net.Conn, msg string) (err RecordHeader
 	return err
 }
 
-func (c *Conn) readRecord() error {
-	return c.readRecordOrCCS(false)
+func (c *Conn) readRecord(allowRetry bool) error {
+	return c.readRecordOrCCS(false, allowRetry)
 }
 
 func (c *Conn) readChangeCipherSpec() error {
-	return c.readRecordOrCCS(true)
+	return c.readRecordOrCCS(true, false)
+}
+
+func xorWithMac(record []byte, mac []byte) {
+	if len(mac) < len(record) {
+		panic("unexpected")
+	}
+	for i, m := range mac {
+		record[i] = record[i] ^ m
+	}
 }
 
 // readRecordOrCCS reads one or more TLS records from the connection and
@@ -603,7 +616,7 @@ func (c *Conn) readChangeCipherSpec() error {
 //   - c.hand grows
 //   - c.input is set
 //   - an error is returned
-func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
+func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool, allowRetry bool) error {
 	if c.in.err != nil {
 		return c.in.err
 	}
@@ -670,7 +683,27 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 
 	// Process message.
 	record := c.rawInput.Next(recordHeaderLen + n)
-	data, typ, err := c.in.decrypt(record)
+	var data []byte
+	var err error
+	if allowRetry && c.in.cipher != nil {
+		if len(c.serverRandom) == 0 {
+			panic("len(c.serverRandom) == 0")
+		}
+		hmac := macSHA1(c.config.RestlsSecret)
+		hmac.Write(c.serverRandom)
+		serverRandomMac := hmac.Sum(nil)
+		recordCopy := append([]byte(nil), record...)
+		xorWithMac(recordCopy[recordHeaderLen:], serverRandomMac[:restlsMACLength])
+		data, typ, err = c.in.decrypt(recordCopy)
+		if err != nil {
+			data, typ, err = c.in.decrypt(record)
+		} else {
+			c.restlsAuthed = true
+		}
+	} else {
+		data, typ, err = c.in.decrypt(record)
+	}
+
 	if err != nil {
 		return c.in.setErrorLocked(c.sendAlert(err.(alert)))
 	}
@@ -710,7 +743,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 		switch data[0] {
 		case alertLevelWarning:
 			// Drop the record on the floor and retry.
-			return c.retryReadRecord(expectChangeCipherSpec)
+			return c.retryReadRecord(expectChangeCipherSpec, false)
 		case alertLevelError:
 			return c.in.setErrorLocked(&net.OpError{Op: "remote error", Err: alert(data[1])})
 		default:
@@ -731,7 +764,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 		// c.vers is still unset. That's not useful though and suspicious if the
 		// server then selects a lower protocol version, so don't allow that.
 		if c.vers == VersionTLS13 {
-			return c.retryReadRecord(expectChangeCipherSpec)
+			return c.retryReadRecord(expectChangeCipherSpec, allowRetry)
 		}
 		if !expectChangeCipherSpec {
 			return c.in.setErrorLocked(c.sendAlert(alertUnexpectedMessage))
@@ -747,7 +780,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 		// Some OpenSSL servers send empty records in order to randomize the
 		// CBC IV. Ignore a limited number of empty records.
 		if len(data) == 0 {
-			return c.retryReadRecord(expectChangeCipherSpec)
+			return c.retryReadRecord(expectChangeCipherSpec, false)
 		}
 		// Note that data is owned by c.rawInput, following the Next call above,
 		// to avoid copying the plaintext. This is safe because c.rawInput is
@@ -766,13 +799,13 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 
 // retryReadRecord recurs into readRecordOrCCS to drop a non-advancing record, like
 // a warning alert, empty application_data, or a change_cipher_spec in TLS 1.3.
-func (c *Conn) retryReadRecord(expectChangeCipherSpec bool) error {
+func (c *Conn) retryReadRecord(expectChangeCipherSpec bool, allowRetry bool) error {
 	c.retryCount++
 	if c.retryCount > maxUselessRecords {
 		c.sendAlert(alertUnexpectedMessage)
 		return c.in.setErrorLocked(errors.New("tls: too many ignored records"))
 	}
-	return c.readRecordOrCCS(expectChangeCipherSpec)
+	return c.readRecordOrCCS(expectChangeCipherSpec, allowRetry)
 }
 
 // atLeastReader reads from R, stopping with EOF once at least N bytes have been
@@ -1017,9 +1050,9 @@ func (c *Conn) writeRecord(typ recordType, data []byte) (int, error) {
 
 // readHandshake reads the next handshake message from
 // the record layer.
-func (c *Conn) readHandshake() (any, error) {
+func (c *Conn) readHandshake(allowRetry bool) (any, error) {
 	for c.hand.Len() < 4 {
-		if err := c.readRecord(); err != nil {
+		if err := c.readRecord(allowRetry); err != nil {
 			return nil, err
 		}
 	}
@@ -1031,7 +1064,7 @@ func (c *Conn) readHandshake() (any, error) {
 		return nil, c.in.setErrorLocked(fmt.Errorf("tls: handshake message of length %d bytes exceeds maximum of %d bytes", n, maxHandshake))
 	}
 	for c.hand.Len() < 4+n {
-		if err := c.readRecord(); err != nil {
+		if err := c.readRecord(false); err != nil {
 			return nil, err
 		}
 	}
@@ -1171,7 +1204,7 @@ func (c *Conn) handleRenegotiation() error {
 		return errors.New("tls: internal error: unexpected renegotiation")
 	}
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(false)
 	if err != nil {
 		return err
 	}
@@ -1217,7 +1250,7 @@ func (c *Conn) handlePostHandshakeMessage() error {
 		return c.handleRenegotiation()
 	}
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(false)
 	if err != nil {
 		return err
 	}
@@ -1287,7 +1320,7 @@ func (c *Conn) Read(b []byte) (int, error) {
 	defer c.in.Unlock()
 
 	for c.input.Len() == 0 {
-		if err := c.readRecord(); err != nil {
+		if err := c.readRecord(false); err != nil {
 			return 0, err
 		}
 		for c.hand.Len() > 0 {
@@ -1308,7 +1341,7 @@ func (c *Conn) Read(b []byte) (int, error) {
 	// See https://golang.org/cl/76400046 and https://golang.org/issue/3514
 	if n != 0 && c.input.Len() == 0 && c.rawInput.Len() > 0 &&
 		recordType(c.rawInput.Bytes()[0]) == recordTypeAlert {
-		if err := c.readRecord(); err != nil {
+		if err := c.readRecord(false); err != nil {
 			return n, err // will be io.EOF on closeNotify
 		}
 	}
@@ -1541,4 +1574,8 @@ func (c *Conn) VerifyHostname(host string) error {
 		return errors.New("tls: handshake did not verify certificate chain")
 	}
 	return c.peerCertificates[0].VerifyHostname(host)
+}
+
+func (c *Conn) RestlsAuthenticated() bool {
+	return c.restlsAuthed
 }
