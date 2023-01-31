@@ -693,8 +693,8 @@ func (hs *serverHandshakeState) establishKeys() error {
 		serverCipher = hs.suite.aead(serverKey, serverIV)
 	}
 
-	c.in.prepareCipherSpec(c.vers, clientCipher, clientHash)
-	c.out.prepareCipherSpec(c.vers, serverCipher, serverHash)
+	c.in.prepareCipherSpec(c.vers, []any{clientCipher}, clientHash)
+	c.out.prepareCipherSpec(c.vers, []any{serverCipher}, serverHash)
 
 	return nil
 }

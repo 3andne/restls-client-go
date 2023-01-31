@@ -170,7 +170,7 @@ func (c *Conn) generateSessionIDFromPKnTicket(hello *clientHelloMsg) {
 		hmac.Write(hello.sessionTicket)
 		copy(hello.sessionId[restls12SessionTicketMACOffset:], hmac.Sum(nil)[:restlsMACLength])
 	}
-	fmt.Printf("generateSessionIDFromPKnTicket %v", hello.sessionId)
+	// fmt.Printf("generateSessionIDFromPKnTicket %v", hello.sessionId)
 }
 
 func (c *Conn) clientHandshake(ctx context.Context) (err error) {
@@ -212,7 +212,7 @@ func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 			return fmt.Errorf("tls: CurvePreferences includes unsupported curve: %v", err)
 		}
 		c.tls12PubKey = params.PublicKey()
-		fmt.Printf("c.tls12PubKey %v", c.tls12PubKey)
+		// fmt.Printf("c.tls12PubKey %v", c.tls12PubKey)
 		c.eagerEcdheParameters = &params
 		c.generateSessionIDFromPKnTicket(hello)
 	}
@@ -427,6 +427,7 @@ func (c *Conn) pickTLSVersion(serverHello *serverHelloMsg) error {
 // Does the handshake, either a full one or resumes old session. Requires hs.c,
 // hs.hello, hs.serverHello, and, optionally, hs.session to be set.
 func (hs *clientHandshakeState) handshake() error {
+	// fmt.Printf("doFullHandshake isClient %v\n", hs.c.isClient)
 	c := hs.c
 
 	isResume, err := hs.processServerHello()
@@ -514,6 +515,7 @@ func (hs *clientHandshakeState) pickCipherSuite() error {
 }
 
 func (hs *clientHandshakeState) doFullHandshake() error {
+	// fmt.Printf("doFullHandshake isClient %v\n", hs.c.isClient)
 	c := hs.c
 
 	msg, err := c.readHandshake(false)
@@ -701,24 +703,27 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 }
 
 func (hs *clientHandshakeState) establishKeys() error {
+	// fmt.Printf("establishKeys isClient %v\n", hs.c.isClient)
 	c := hs.c
 
 	clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
 		keysFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.hello.random, hs.serverHello.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
-	var clientCipher, serverCipher any
+	var clientCipher, serverCipher, serverCipher2 any
 	var clientHash, serverHash hash.Hash
 	if hs.suite.cipher != nil {
 		clientCipher = hs.suite.cipher(clientKey, clientIV, false /* not for reading */)
 		clientHash = hs.suite.mac(clientMAC)
 		serverCipher = hs.suite.cipher(serverKey, serverIV, true /* for reading */)
+		serverCipher2 = hs.suite.cipher(serverKey, serverIV, true)
 		serverHash = hs.suite.mac(serverMAC)
 	} else {
 		clientCipher = hs.suite.aead(clientKey, clientIV)
 		serverCipher = hs.suite.aead(serverKey, serverIV)
+		serverCipher2 = hs.suite.aead(serverKey, serverIV)
 	}
 
-	c.in.prepareCipherSpec(c.vers, serverCipher, serverHash)
-	c.out.prepareCipherSpec(c.vers, clientCipher, clientHash)
+	c.in.prepareCipherSpec(c.vers, []any{serverCipher, serverCipher2}, serverHash)
+	c.out.prepareCipherSpec(c.vers, []any{clientCipher}, clientHash)
 	return nil
 }
 
@@ -813,12 +818,14 @@ func checkALPN(clientProtos []string, serverProto string) error {
 }
 
 func (hs *clientHandshakeState) readFinished(out []byte) error {
+	// fmt.Printf("readFinished isClient %v\n", hs.c.isClient)
 	c := hs.c
 
 	if err := c.readChangeCipherSpec(); err != nil {
 		return err
 	}
 
+	// fmt.Printf("readFinished readHandshake\n")
 	msg, err := c.readHandshake(true)
 	if err != nil {
 		return err

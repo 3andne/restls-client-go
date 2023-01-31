@@ -179,8 +179,9 @@ type halfConn struct {
 
 	scratchBuf [13]byte // to avoid allocs; interface method args escape
 
-	nextCipher any       // next encryption state
-	nextMac    hash.Hash // next MAC algorithm
+	nextCipher []any // next encryption state
+
+	nextMac hash.Hash // next MAC algorithm
 
 	trafficSecret []byte // current TLS 1.3 traffic secret
 }
@@ -205,7 +206,7 @@ func (hc *halfConn) setErrorLocked(err error) error {
 
 // prepareCipherSpec sets the encryption and MAC states
 // that a subsequent changeCipherSpec will use.
-func (hc *halfConn) prepareCipherSpec(version uint16, cipher any, mac hash.Hash) {
+func (hc *halfConn) prepareCipherSpec(version uint16, cipher []any, mac hash.Hash) {
 	hc.version = version
 	hc.nextCipher = cipher
 	hc.nextMac = mac
@@ -217,9 +218,9 @@ func (hc *halfConn) changeCipherSpec() error {
 	if hc.nextCipher == nil || hc.version == VersionTLS13 {
 		return alertInternalError
 	}
-	hc.cipher = hc.nextCipher
+	hc.cipher = hc.nextCipher[0]
 	hc.mac = hc.nextMac
-	hc.nextCipher = nil
+	hc.nextCipher = hc.nextCipher[1:]
 	hc.nextMac = nil
 	for i := range hc.seq {
 		hc.seq[i] = 0
@@ -227,10 +228,15 @@ func (hc *halfConn) changeCipherSpec() error {
 	return nil
 }
 
-func (hc *halfConn) setTrafficSecret(suite *cipherSuiteTLS13, secret []byte) {
+func (hc *halfConn) setTrafficSecret(suite *cipherSuiteTLS13, secret []byte, clientIn bool) {
 	hc.trafficSecret = secret
 	key, iv := suite.trafficKey(secret)
 	hc.cipher = suite.aead(key, iv)
+	if clientIn {
+		hc.nextCipher = []any{suite.aead(key, iv)}
+	} else {
+		hc.nextCipher = nil
+	}
 	for i := range hc.seq {
 		hc.seq[i] = 0
 	}
@@ -590,15 +596,18 @@ func (c *Conn) readRecord(allowRetry bool) error {
 }
 
 func (c *Conn) readChangeCipherSpec() error {
+	// fmt.Printf("readChangeCipherSpec isClient %v\n", c.isClient)
+
 	return c.readRecordOrCCS(true, false)
 }
 
 func xorWithMac(record []byte, mac []byte) {
-	if len(mac) < len(record) {
-		panic("unexpected")
+	lenXor := len(mac)
+	if len(record) < lenXor {
+		lenXor = len(record)
 	}
-	for i, m := range mac {
-		record[i] = record[i] ^ m
+	for i := 0; i < lenXor; i += 1 {
+		record[i] = record[i] ^ mac[i]
 	}
 }
 
@@ -617,6 +626,7 @@ func xorWithMac(record []byte, mac []byte) {
 //   - c.input is set
 //   - an error is returned
 func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool, allowRetry bool) error {
+	// defer fmt.Printf("return from readRecordOrCCS\n")
 	if c.in.err != nil {
 		return c.in.err
 	}
@@ -685,7 +695,8 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool, allowRetry bool) err
 	record := c.rawInput.Next(recordHeaderLen + n)
 	var data []byte
 	var err error
-	if allowRetry && c.in.cipher != nil {
+	if allowRetry && len(c.in.nextCipher) == 1 && typ != recordTypeChangeCipherSpec {
+		// fmt.Printf("decrypt with retry: %v\n", c.isClient)
 		if len(c.serverRandom) == 0 {
 			panic("len(c.serverRandom) == 0")
 		}
@@ -696,15 +707,22 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool, allowRetry bool) err
 		xorWithMac(recordCopy[recordHeaderLen:], serverRandomMac[:restlsMACLength])
 		data, typ, err = c.in.decrypt(recordCopy)
 		if err != nil {
+			c.in.cipher = c.in.nextCipher[0]
+			// fmt.Printf("backup cipher isClient: %v\n", c.isClient)
 			data, typ, err = c.in.decrypt(record)
 		} else {
 			c.restlsAuthed = true
 		}
+		c.in.nextCipher = nil
 	} else {
+		// fmt.Printf("decrypt directly: %v\n", c.isClient)
 		data, typ, err = c.in.decrypt(record)
 	}
 
 	if err != nil {
+		if len(c.in.nextCipher) == 0 {
+			// fmt.Printf("backup cipher failed\n")
+		}
 		return c.in.setErrorLocked(c.sendAlert(err.(alert)))
 	}
 	if len(data) > maxPlaintext {
@@ -752,6 +770,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool, allowRetry bool) err
 
 	case recordTypeChangeCipherSpec:
 		if len(data) != 1 || data[0] != 1 {
+			// fmt.Printf("len(data) != 1 || data[0] != 1\n")
 			return c.in.setErrorLocked(c.sendAlert(alertDecodeError))
 		}
 		// Handshake messages are not allowed to fragment across the CCS.
@@ -1279,7 +1298,7 @@ func (c *Conn) handleKeyUpdate(keyUpdate *keyUpdateMsg) error {
 	}
 
 	newSecret := cipherSuite.nextTrafficSecret(c.in.trafficSecret)
-	c.in.setTrafficSecret(cipherSuite, newSecret)
+	c.in.setTrafficSecret(cipherSuite, newSecret, false)
 
 	if keyUpdate.updateRequested {
 		c.out.Lock()
@@ -1294,7 +1313,7 @@ func (c *Conn) handleKeyUpdate(keyUpdate *keyUpdateMsg) error {
 		}
 
 		newSecret := cipherSuite.nextTrafficSecret(c.out.trafficSecret)
-		c.out.setTrafficSecret(cipherSuite, newSecret)
+		c.out.setTrafficSecret(cipherSuite, newSecret, false)
 	}
 
 	return nil
