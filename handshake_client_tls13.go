@@ -105,6 +105,13 @@ func (hs *clientHandshakeStateTLS13) handshake() error {
 
 	c.isHandshakeComplete.Store(true)
 
+	hash := macSHA1(c.config.RestlsSecret)
+	hash.Write(hs.serverHello.random)
+	group := hs.serverHello.serverShare.group
+	hash.Write([]byte{byte(group >> 8), byte(group & 255)})
+	hash.Write(hs.serverHello.serverShare.data)
+	c.restlsAuthHeader = hash.Sum(nil)[:restlsMACLength]
+
 	return nil
 }
 
@@ -202,6 +209,7 @@ func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 	}
 
 	if hs.serverHello.serverShare.group != 0 {
+		// fmt.Printf("hs.serverHello.serverShare.group == 0\n")
 		c.sendAlert(alertDecodeError)
 		return errors.New("tls: received malformed key_share extension")
 	}
@@ -268,7 +276,7 @@ func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 		return err
 	}
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(false)
 	if err != nil {
 		return err
 	}
@@ -279,6 +287,7 @@ func (hs *clientHandshakeStateTLS13) processHelloRetryRequest() error {
 		return unexpectedMessageError(serverHello, msg)
 	}
 	hs.serverHello = serverHello
+	c.serverRandom = serverHello.random
 
 	if err := hs.checkServerHelloOrHRR(); err != nil {
 		return err
@@ -362,10 +371,10 @@ func (hs *clientHandshakeStateTLS13) establishHandshakeKeys() error {
 
 	clientSecret := hs.suite.deriveSecret(handshakeSecret,
 		clientHandshakeTrafficLabel, hs.transcript)
-	c.out.setTrafficSecret(hs.suite, clientSecret)
+	c.out.setTrafficSecret(hs.suite, clientSecret, false)
 	serverSecret := hs.suite.deriveSecret(handshakeSecret,
 		serverHandshakeTrafficLabel, hs.transcript)
-	c.in.setTrafficSecret(hs.suite, serverSecret)
+	c.in.setTrafficSecret(hs.suite, serverSecret, true)
 
 	err := c.config.writeKeyLog(keyLogLabelClientHandshake, hs.hello.random, clientSecret)
 	if err != nil {
@@ -385,9 +394,11 @@ func (hs *clientHandshakeStateTLS13) establishHandshakeKeys() error {
 }
 
 func (hs *clientHandshakeStateTLS13) readServerParameters() error {
+	// fmt.Printf("readServerParameters13\n")
+
 	c := hs.c
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(true)
 	if err != nil {
 		return err
 	}
@@ -426,7 +437,7 @@ func (hs *clientHandshakeStateTLS13) readServerCertificate() error {
 		return nil
 	}
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(false)
 	if err != nil {
 		return err
 	}
@@ -437,7 +448,7 @@ func (hs *clientHandshakeStateTLS13) readServerCertificate() error {
 
 		hs.certReq = certReq
 
-		msg, err = c.readHandshake()
+		msg, err = c.readHandshake(false)
 		if err != nil {
 			return err
 		}
@@ -449,6 +460,7 @@ func (hs *clientHandshakeStateTLS13) readServerCertificate() error {
 		return unexpectedMessageError(certMsg, msg)
 	}
 	if len(certMsg.certificate.Certificate) == 0 {
+		// fmt.Printf("Certificate == 0\n")
 		c.sendAlert(alertDecodeError)
 		return errors.New("tls: received empty certificates message")
 	}
@@ -461,7 +473,7 @@ func (hs *clientHandshakeStateTLS13) readServerCertificate() error {
 		return err
 	}
 
-	msg, err = c.readHandshake()
+	msg, err = c.readHandshake(false)
 	if err != nil {
 		return err
 	}
@@ -500,7 +512,7 @@ func (hs *clientHandshakeStateTLS13) readServerCertificate() error {
 func (hs *clientHandshakeStateTLS13) readServerFinished() error {
 	c := hs.c
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(false)
 	if err != nil {
 		return err
 	}
@@ -525,7 +537,7 @@ func (hs *clientHandshakeStateTLS13) readServerFinished() error {
 		clientApplicationTrafficLabel, hs.transcript)
 	serverSecret := hs.suite.deriveSecret(hs.masterSecret,
 		serverApplicationTrafficLabel, hs.transcript)
-	c.in.setTrafficSecret(hs.suite, serverSecret)
+	c.in.setTrafficSecret(hs.suite, serverSecret, false)
 
 	err = c.config.writeKeyLog(keyLogLabelClientTraffic, hs.hello.random, hs.trafficSecret)
 	if err != nil {
@@ -624,7 +636,7 @@ func (hs *clientHandshakeStateTLS13) sendClientFinished() error {
 		return err
 	}
 
-	c.out.setTrafficSecret(hs.suite, hs.trafficSecret)
+	c.out.setTrafficSecret(hs.suite, hs.trafficSecret, false)
 
 	if !c.config.SessionTicketsDisabled && c.config.ClientSessionCache != nil {
 		c.resumptionSecret = hs.suite.deriveSecret(hs.masterSecret,

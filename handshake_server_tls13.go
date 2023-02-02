@@ -426,7 +426,7 @@ func (hs *serverHandshakeStateTLS13) doHelloRetryRequest(selectedGroup CurveID) 
 		return err
 	}
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(false)
 	if err != nil {
 		return err
 	}
@@ -536,10 +536,10 @@ func (hs *serverHandshakeStateTLS13) sendServerParameters() error {
 
 	clientSecret := hs.suite.deriveSecret(hs.handshakeSecret,
 		clientHandshakeTrafficLabel, hs.transcript)
-	c.in.setTrafficSecret(hs.suite, clientSecret)
+	c.in.setTrafficSecret(hs.suite, clientSecret, false)
 	serverSecret := hs.suite.deriveSecret(hs.handshakeSecret,
 		serverHandshakeTrafficLabel, hs.transcript)
-	c.out.setTrafficSecret(hs.suite, serverSecret)
+	c.out.setTrafficSecret(hs.suite, serverSecret, false)
 
 	err := c.config.writeKeyLog(keyLogLabelClientHandshake, hs.clientHello.random, clientSecret)
 	if err != nil {
@@ -665,7 +665,7 @@ func (hs *serverHandshakeStateTLS13) sendServerFinished() error {
 		clientApplicationTrafficLabel, hs.transcript)
 	serverSecret := hs.suite.deriveSecret(hs.masterSecret,
 		serverApplicationTrafficLabel, hs.transcript)
-	c.out.setTrafficSecret(hs.suite, serverSecret)
+	c.out.setTrafficSecret(hs.suite, serverSecret, false)
 
 	err := c.config.writeKeyLog(keyLogLabelClientTraffic, hs.clientHello.random, hs.trafficSecret)
 	if err != nil {
@@ -783,7 +783,7 @@ func (hs *serverHandshakeStateTLS13) readClientCertificate() error {
 	// If we requested a client certificate, then the client must send a
 	// certificate message. If it's empty, no CertificateVerify is sent.
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(false)
 	if err != nil {
 		return err
 	}
@@ -807,7 +807,7 @@ func (hs *serverHandshakeStateTLS13) readClientCertificate() error {
 	}
 
 	if len(certMsg.certificate.Certificate) != 0 {
-		msg, err = c.readHandshake()
+		msg, err = c.readHandshake(false)
 		if err != nil {
 			return err
 		}
@@ -853,7 +853,7 @@ func (hs *serverHandshakeStateTLS13) readClientCertificate() error {
 func (hs *serverHandshakeStateTLS13) readClientFinished() error {
 	c := hs.c
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(false)
 	if err != nil {
 		return err
 	}
@@ -869,7 +869,7 @@ func (hs *serverHandshakeStateTLS13) readClientFinished() error {
 		return errors.New("tls: invalid client finished hash")
 	}
 
-	c.in.setTrafficSecret(hs.suite, hs.trafficSecret)
+	c.in.setTrafficSecret(hs.suite, hs.trafficSecret, false)
 
 	return nil
 }

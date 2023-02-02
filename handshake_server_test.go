@@ -254,7 +254,7 @@ func TestTLS12OnlyCipherSuites(t *testing.T) {
 		cli := Client(c, testConfig)
 		cli.vers = clientHello.vers
 		cli.writeRecord(recordTypeHandshake, clientHello.marshal())
-		reply, err := cli.readHandshake()
+		reply, err := cli.readHandshake(false)
 		c.Close()
 		if err != nil {
 			replyChan <- err
@@ -309,7 +309,7 @@ func TestTLSPointFormats(t *testing.T) {
 				cli := Client(c, testConfig)
 				cli.vers = clientHello.vers
 				cli.writeRecord(recordTypeHandshake, clientHello.marshal())
-				reply, err := cli.readHandshake()
+				reply, err := cli.readHandshake(false)
 				c.Close()
 				if err != nil {
 					replyChan <- err

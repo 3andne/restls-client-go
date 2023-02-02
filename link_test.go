@@ -6,11 +6,12 @@ package restls
 
 import (
 	"bytes"
-	"internal/testenv"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/rogpeppe/go-internal/testenv"
 )
 
 // Tests that the linker is able to remove references to the Client or Server if unused.
