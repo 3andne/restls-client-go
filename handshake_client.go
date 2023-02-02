@@ -151,6 +151,8 @@ func (c *Conn) generateSessionIDForTLS13(hello *clientHelloMsg) {
 		panic("session id should only be generated from key share for TLS 1.3")
 	}
 	hmac := macSHA1(c.config.RestlsSecret)
+	group := hello.keyShares[0].group
+	hmac.Write([]byte{byte(group >> 8), byte(group & 255)})
 	hmac.Write(hello.keyShares[0].data)
 	for _, psk := range hello.pskIdentities {
 		hmac.Write(psk.label)

@@ -123,6 +123,8 @@ type Conn struct {
 	serverRandom []byte
 
 	restlsAuthed bool
+
+	restlsAuthHeader []byte
 }
 
 // Access to net.Conn methods.
@@ -714,15 +716,14 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool, allowRetry bool) err
 			c.restlsAuthed = true
 		}
 		c.in.nextCipher = nil
+	} else if handshakeComplete && c.restlsAuthed {
+		data, typ = record[recordHeaderLen:], recordTypeApplicationData
 	} else {
 		// fmt.Printf("decrypt directly: %v\n", c.isClient)
 		data, typ, err = c.in.decrypt(record)
 	}
 
 	if err != nil {
-		if len(c.in.nextCipher) == 0 {
-			// fmt.Printf("backup cipher failed\n")
-		}
 		return c.in.setErrorLocked(c.sendAlert(err.(alert)))
 	}
 	if len(data) > maxPlaintext {
@@ -998,6 +999,50 @@ var outBufPool = sync.Pool{
 	},
 }
 
+func (c *Conn) writeRestlsApplicationRecord(data []byte) (int, error) {
+	outBufPtr := outBufPool.Get().(*[]byte)
+	outBuf := *outBufPtr
+	defer func() {
+		// You might be tempted to simplify this by just passing &outBuf to Put,
+		// but that would make the local copy of the outBuf slice header escape
+		// to the heap, causing an allocation. Instead, we keep around the
+		// pointer to the slice header returned by Get, which is already on the
+		// heap, and overwrite and return that.
+		*outBufPtr = outBuf
+		outBufPool.Put(outBufPtr)
+	}()
+
+	var n int
+	for len(data) > 0 {
+		m := len(data) + len(c.restlsAuthHeader)
+		if m > maxPlaintext {
+			m = maxPlaintext
+		}
+
+		_, outBuf = sliceForAppend(outBuf[:0], recordHeaderLen)
+		outBuf[0] = byte(recordTypeApplicationData)
+		vers := VersionTLS12
+		outBuf[1] = byte(vers >> 8)
+		outBuf[2] = byte(vers)
+		outBuf[3] = byte(m >> 8)
+		outBuf[4] = byte(m)
+
+		if len(c.restlsAuthHeader) > 0 {
+			outBuf = append(outBuf, c.restlsAuthHeader...)
+			m -= len(c.restlsAuthHeader)
+			c.restlsAuthHeader = nil
+		}
+		outBuf = append(outBuf, data[:m]...)
+		if _, err := c.write(outBuf); err != nil {
+			return n, err
+		}
+		n += m
+		data = data[m:]
+	}
+
+	return n, nil
+}
+
 // writeRecordLocked writes a TLS record with the given type and payload to the
 // connection and updates the record layer state.
 func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
@@ -1212,9 +1257,14 @@ func (c *Conn) Write(b []byte) (int, error) {
 			m, b = 1, b[1:]
 		}
 	}
+	if c.restlsAuthed {
+		n, err := c.writeRestlsApplicationRecord(b)
+		return n, c.out.setErrorLocked(err)
+	} else {
+		n, err := c.writeRecordLocked(recordTypeApplicationData, b)
+		return n + m, c.out.setErrorLocked(err)
+	}
 
-	n, err := c.writeRecordLocked(recordTypeApplicationData, b)
-	return n + m, c.out.setErrorLocked(err)
 }
 
 // handleRenegotiation processes a HelloRequest handshake message.
