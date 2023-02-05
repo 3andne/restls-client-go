@@ -107,9 +107,7 @@ func (hs *clientHandshakeStateTLS13) handshake() error {
 
 	hash := macSHA1(c.config.RestlsSecret)
 	hash.Write(hs.serverHello.random)
-	group := hs.serverHello.serverShare.group
-	hash.Write([]byte{byte(group >> 8), byte(group & 255)})
-	hash.Write(hs.serverHello.serverShare.data)
+	hash.Write(hs.serverHello.random)
 	c.restlsAuthHeader = hash.Sum(nil)[:restlsMACLength]
 
 	return nil
