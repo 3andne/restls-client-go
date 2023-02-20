@@ -30,7 +30,7 @@ type keyAgreement interface {
 
 	// This method may not be called if the server doesn't send a
 	// ServerKeyExchange message.
-	processServerKeyExchange(*Config, *clientHelloMsg, *serverHelloMsg, *x509.Certificate, *serverKeyExchangeMsg, *ecdheParameters, []byte) error
+	processServerKeyExchange(*Config, *clientHelloMsg, *serverHelloMsg, *x509.Certificate, *serverKeyExchangeMsg, ecdheParameters /* #Restls# */) error
 	generateClientKeyExchange(*Config, *clientHelloMsg, *x509.Certificate) ([]byte, *clientKeyExchangeMsg, error)
 }
 
@@ -73,7 +73,7 @@ func (ka rsaKeyAgreement) processClientKeyExchange(config *Config, cert *Certifi
 	return preMasterSecret, nil
 }
 
-func (ka rsaKeyAgreement) processServerKeyExchange(config *Config, clientHello *clientHelloMsg, serverHello *serverHelloMsg, cert *x509.Certificate, skx *serverKeyExchangeMsg, eagerParam *ecdheParameters, eagerPubKey []byte) error {
+func (ka rsaKeyAgreement) processServerKeyExchange(config *Config, clientHello *clientHelloMsg, serverHello *serverHelloMsg, cert *x509.Certificate, skx *serverKeyExchangeMsg, eagerParam ecdheParameters /* #Restls# */) error {
 	return errors.New("tls: unexpected ServerKeyExchange")
 }
 
@@ -267,7 +267,7 @@ func (ka *ecdheKeyAgreement) processClientKeyExchange(config *Config, cert *Cert
 	return preMasterSecret, nil
 }
 
-func (ka *ecdheKeyAgreement) processServerKeyExchange(config *Config, clientHello *clientHelloMsg, serverHello *serverHelloMsg, cert *x509.Certificate, skx *serverKeyExchangeMsg, eagerParam *ecdheParameters, eagerPubKey []byte) (err error) {
+func (ka *ecdheKeyAgreement) processServerKeyExchange(config *Config, clientHello *clientHelloMsg, serverHello *serverHelloMsg, cert *x509.Certificate, skx *serverKeyExchangeMsg, params ecdheParameters) (err error) {
 	if len(skx.key) < 4 {
 		return errServerKeyExchange
 	}
@@ -292,24 +292,20 @@ func (ka *ecdheKeyAgreement) processServerKeyExchange(config *Config, clientHell
 		return errors.New("tls: server selected unsupported curve")
 	}
 
-	ourPublicKey := eagerPubKey
-
-	if curveID != config.CurveIDHint {
-		params, err := generateECDHEParameters(config.rand(), curveID)
+	if curveID != config.CurveIDHint { // #Restls#
+		params, err = generateECDHEParameters(config.rand(), curveID) // #Restls#
 		if err != nil {
 			return err
 		}
-		ka.params = params
-		ourPublicKey = params.PublicKey()
-	} else {
-		ka.params = *eagerParam
-	}
+	} // #Restls#
+	ka.params = params
 
-	ka.preMasterSecret = ka.params.SharedKey(publicKey)
+	ka.preMasterSecret = params.SharedKey(publicKey)
 	if ka.preMasterSecret == nil {
 		return errServerKeyExchange
 	}
 
+	ourPublicKey := params.PublicKey()
 	ka.ckx = new(clientKeyExchangeMsg)
 	ka.ckx.ciphertext = make([]byte, 1+len(ourPublicKey))
 	ka.ckx.ciphertext[0] = byte(len(ourPublicKey))

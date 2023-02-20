@@ -735,11 +735,9 @@ type Config struct {
 	// auto-rotation logic. See Config.ticketKeys.
 	autoSessionTicketKeys []ticketKey
 
-	RestlsSecret []byte
-
-	VersionHint uint8
-
-	CurveIDHint CurveID
+	RestlsSecret []byte  // #RESTLS#
+	VersionHint  uint8   // #RESTLS#
+	CurveIDHint  CurveID // #RESTLS#
 }
 
 const (
@@ -820,9 +818,9 @@ func (c *Config) Clone() *Config {
 		KeyLogWriter:                c.KeyLogWriter,
 		sessionTicketKeys:           c.sessionTicketKeys,
 		autoSessionTicketKeys:       c.autoSessionTicketKeys,
-		CurveIDHint:                 c.CurveIDHint,
-		VersionHint:                 c.VersionHint,
-		RestlsSecret:                c.RestlsSecret,
+		CurveIDHint:                 c.CurveIDHint,  // #RESTLS#
+		VersionHint:                 c.VersionHint,  // #RESTLS#
+		RestlsSecret:                c.RestlsSecret, // #RESTLS#
 	}
 }
 
@@ -1493,13 +1491,16 @@ func isSupportedSignatureAlgorithm(sigAlg SignatureScheme, supportedSignatureAlg
 	return false
 }
 
+// #RESTLS#
 const (
 	TLS12Hint uint8 = 12
 	TLS13Hint uint8 = 13
 )
 
+// #RESTLS#
 const (
-	restlsMACLength                uint = 16
+	restlsHandshakeMACLength       uint = 16
+	restlsAppDataMACLength         uint = 8
 	restls12SessionTicketMACOffset uint = 16
 	restls12PubKeyMACOffset        uint = 0
 )

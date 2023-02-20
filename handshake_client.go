@@ -146,6 +146,7 @@ func (c *Conn) makeClientHello() (*clientHelloMsg, ecdheParameters, error) {
 	return hello, params, nil
 }
 
+// #Restls#
 func (c *Conn) generateSessionIDForTLS13(hello *clientHelloMsg) {
 	if c.config.VersionHint != TLS13Hint {
 		panic("session id should only be generated from key share for TLS 1.3")
@@ -157,22 +158,22 @@ func (c *Conn) generateSessionIDForTLS13(hello *clientHelloMsg) {
 	for _, psk := range hello.pskIdentities {
 		hmac.Write(psk.label)
 	}
-	copy(hello.sessionId, hmac.Sum(nil)[:restlsMACLength])
+	copy(hello.sessionId, hmac.Sum(nil)[:restlsHandshakeMACLength])
 }
 
+// #Restls#
 func (c *Conn) generateSessionIDFromPKnTicket(hello *clientHelloMsg) {
 	if c.config.VersionHint != TLS12Hint {
 		panic("session id should only be generated from pub key and session ticket for TLS 1.2")
 	}
 	hmac := macSHA1(c.config.RestlsSecret)
 	hmac.Write(c.tls12PubKey)
-	copy(hello.sessionId[restls12PubKeyMACOffset:], hmac.Sum(nil)[:restlsMACLength])
+	copy(hello.sessionId[restls12PubKeyMACOffset:], hmac.Sum(nil)[:restlsHandshakeMACLength])
 	if len(hello.sessionTicket) > 0 {
 		hmac := macSHA1(c.config.RestlsSecret)
 		hmac.Write(hello.sessionTicket)
-		copy(hello.sessionId[restls12SessionTicketMACOffset:], hmac.Sum(nil)[:restlsMACLength])
+		copy(hello.sessionId[restls12SessionTicketMACOffset:], hmac.Sum(nil)[:restlsHandshakeMACLength])
 	}
-	// fmt.Printf("generateSessionIDFromPKnTicket %v", hello.sessionId)
 }
 
 func (c *Conn) clientHandshake(ctx context.Context) (err error) {
@@ -190,9 +191,11 @@ func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 	}
 	c.serverName = hello.serverName
 
+	// #Restls# Begin
 	if c.config.VersionHint == TLS13Hint {
 		c.generateSessionIDForTLS13(hello)
 	}
+	// #Restls# End
 	cacheKey, session, earlySecret, binderKey := c.loadSession(hello)
 	if cacheKey != "" && session != nil {
 		defer func() {
@@ -208,6 +211,7 @@ func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 		}()
 	}
 
+	// #Restls# Begin
 	if c.config.VersionHint == TLS12Hint {
 		params, err := generateECDHEParameters(c.config.rand(), c.config.CurveIDHint)
 		if err != nil {
@@ -218,12 +222,13 @@ func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 		c.eagerEcdheParameters = &params
 		c.generateSessionIDFromPKnTicket(hello)
 	}
+	// #Restls# End
 
 	if _, err := c.writeRecord(recordTypeHandshake, hello.marshal()); err != nil {
 		return err
 	}
 
-	msg, err := c.readHandshake(false)
+	msg, err := c.readHandshake()
 	if err != nil {
 		return err
 	}
@@ -250,7 +255,8 @@ func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 		return errors.New("tls: downgrade attempt detected, possibly due to a MitM attack or a broken middlebox")
 	}
 
-	c.serverRandom = serverHello.random
+	c.serverRandom = serverHello.random  // #Restls#
+	c.restlsAuthHeader = make([]byte, 8) // #Restls#
 	if c.vers == VersionTLS13 {
 		hs := &clientHandshakeStateTLS13{
 			c:           c,
@@ -390,9 +396,11 @@ func (c *Conn) loadSession(hello *clientHelloMsg) (cacheKey string,
 	}
 	hello.pskIdentities = []pskIdentity{identity}
 	hello.pskBinders = [][]byte{make([]byte, cipherSuite.hash.Size())}
+	// #Restls# Begin
 	if c.config.VersionHint == TLS13Hint {
 		c.generateSessionIDForTLS13(hello)
 	}
+	// #Restls# End
 	// Compute the PSK binders. See RFC 8446, Section 4.2.11.2.
 	psk := cipherSuite.expandLabel(session.masterSecret, "resumption",
 		session.nonce, cipherSuite.hash.Size())
@@ -429,7 +437,6 @@ func (c *Conn) pickTLSVersion(serverHello *serverHelloMsg) error {
 // Does the handshake, either a full one or resumes old session. Requires hs.c,
 // hs.hello, hs.serverHello, and, optionally, hs.session to be set.
 func (hs *clientHandshakeState) handshake() error {
-	// fmt.Printf("doFullHandshake isClient %v\n", hs.c.isClient)
 	c := hs.c
 
 	isResume, err := hs.processServerHello()
@@ -517,10 +524,9 @@ func (hs *clientHandshakeState) pickCipherSuite() error {
 }
 
 func (hs *clientHandshakeState) doFullHandshake() error {
-	// fmt.Printf("doFullHandshake isClient %v\n", hs.c.isClient)
 	c := hs.c
 
-	msg, err := c.readHandshake(false)
+	msg, err := c.readHandshake()
 	if err != nil {
 		return err
 	}
@@ -531,7 +537,7 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 	}
 	hs.finishedHash.Write(certMsg.marshal())
 
-	msg, err = c.readHandshake(false)
+	msg, err = c.readHandshake()
 	if err != nil {
 		return err
 	}
@@ -553,7 +559,7 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 
 		c.ocspResponse = cs.response
 
-		msg, err = c.readHandshake(false)
+		msg, err = c.readHandshake()
 		if err != nil {
 			return err
 		}
@@ -583,13 +589,13 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 	skx, ok := msg.(*serverKeyExchangeMsg)
 	if ok {
 		hs.finishedHash.Write(skx.marshal())
-		err = keyAgreement.processServerKeyExchange(c.config, hs.hello, hs.serverHello, c.peerCertificates[0], skx, c.eagerEcdheParameters, c.tls12PubKey)
+		err = keyAgreement.processServerKeyExchange(c.config, hs.hello, hs.serverHello, c.peerCertificates[0], skx, *c.eagerEcdheParameters /* #Restls# */)
 		if err != nil {
 			c.sendAlert(alertUnexpectedMessage)
 			return err
 		}
 
-		msg, err = c.readHandshake(false)
+		msg, err = c.readHandshake()
 		if err != nil {
 			return err
 		}
@@ -608,7 +614,7 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 			return err
 		}
 
-		msg, err = c.readHandshake(false)
+		msg, err = c.readHandshake()
 		if err != nil {
 			return err
 		}
@@ -705,27 +711,27 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 }
 
 func (hs *clientHandshakeState) establishKeys() error {
-	// fmt.Printf("establishKeys isClient %v\n", hs.c.isClient)
 	c := hs.c
 
 	clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
 		keysFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.hello.random, hs.serverHello.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
-	var clientCipher, serverCipher, serverCipher2 any
+	var clientCipher, serverCipher any
+	var serverCipher2 any // #Restls#
 	var clientHash, serverHash hash.Hash
 	if hs.suite.cipher != nil {
 		clientCipher = hs.suite.cipher(clientKey, clientIV, false /* not for reading */)
 		clientHash = hs.suite.mac(clientMAC)
 		serverCipher = hs.suite.cipher(serverKey, serverIV, true /* for reading */)
-		serverCipher2 = hs.suite.cipher(serverKey, serverIV, true)
+		serverCipher2 = hs.suite.cipher(serverKey, serverIV, true) // #Restls#
 		serverHash = hs.suite.mac(serverMAC)
 	} else {
 		clientCipher = hs.suite.aead(clientKey, clientIV)
 		serverCipher = hs.suite.aead(serverKey, serverIV)
-		serverCipher2 = hs.suite.aead(serverKey, serverIV)
+		serverCipher2 = hs.suite.aead(serverKey, serverIV) // #Restls#
 	}
 
-	c.in.prepareCipherSpec(c.vers, []any{serverCipher, serverCipher2}, serverHash)
-	c.out.prepareCipherSpec(c.vers, []any{clientCipher}, clientHash)
+	c.in.prepareCipherSpec(c.vers, serverCipher, serverHash, serverCipher2 /* #Restls# */)
+	c.out.prepareCipherSpec(c.vers, clientCipher, clientHash)
 	return nil
 }
 
@@ -820,15 +826,13 @@ func checkALPN(clientProtos []string, serverProto string) error {
 }
 
 func (hs *clientHandshakeState) readFinished(out []byte) error {
-	// fmt.Printf("readFinished isClient %v\n", hs.c.isClient)
 	c := hs.c
 
 	if err := c.readChangeCipherSpec(); err != nil {
 		return err
 	}
 
-	// fmt.Printf("readFinished readHandshake\n")
-	msg, err := c.readHandshake(true)
+	msg, err := c.readHandshake()
 	if err != nil {
 		return err
 	}
@@ -855,7 +859,7 @@ func (hs *clientHandshakeState) readSessionTicket() error {
 	}
 
 	c := hs.c
-	msg, err := c.readHandshake(false)
+	msg, err := c.readHandshake()
 	if err != nil {
 		return err
 	}

@@ -51,6 +51,7 @@ func Client(conn net.Conn, config *Config) *Conn {
 		isClient: true,
 	}
 	c.handshakeFn = c.clientHandshake
+	c.in.restlsFlow.initAsClientInbound() // #Restls#
 	return c
 }
 

@@ -116,15 +116,11 @@ type Conn struct {
 
 	tmp [16]byte
 
-	tls12PubKey []byte
-
-	eagerEcdheParameters *ecdheParameters
-
-	serverRandom []byte
-
-	restlsAuthed bool
-
-	restlsAuthHeader []byte
+	tls12PubKey          []byte           // #RESTLS#
+	eagerEcdheParameters *ecdheParameters // #RESTLS#
+	serverRandom         []byte           // #RESTLS#
+	restlsAuthed         bool             // #RESTLS#
+	restlsAuthHeader     []byte           // #RESTLS#
 }
 
 // Access to net.Conn methods.
@@ -181,11 +177,12 @@ type halfConn struct {
 
 	scratchBuf [13]byte // to avoid allocs; interface method args escape
 
-	nextCipher []any // next encryption state
-
-	nextMac hash.Hash // next MAC algorithm
+	nextCipher any       // next encryption state
+	nextMac    hash.Hash // next MAC algorithm
 
 	trafficSecret []byte // current TLS 1.3 traffic secret
+
+	restlsFlow RestlsFlow // #Restls#
 }
 
 type permanentError struct {
@@ -208,10 +205,11 @@ func (hc *halfConn) setErrorLocked(err error) error {
 
 // prepareCipherSpec sets the encryption and MAC states
 // that a subsequent changeCipherSpec will use.
-func (hc *halfConn) prepareCipherSpec(version uint16, cipher []any, mac hash.Hash) {
+func (hc *halfConn) prepareCipherSpec(version uint16, cipher any, mac hash.Hash, backupCipher ...any /* #Restls# */) {
 	hc.version = version
 	hc.nextCipher = cipher
 	hc.nextMac = mac
+	hc.restlsFlow.setBackupCipher(backupCipher...) // #Restls#
 }
 
 // changeCipherSpec changes the encryption and MAC states
@@ -220,25 +218,23 @@ func (hc *halfConn) changeCipherSpec() error {
 	if hc.nextCipher == nil || hc.version == VersionTLS13 {
 		return alertInternalError
 	}
-	hc.cipher = hc.nextCipher[0]
+	hc.cipher = hc.nextCipher
 	hc.mac = hc.nextMac
-	hc.nextCipher = hc.nextCipher[1:]
+	hc.nextCipher = nil
 	hc.nextMac = nil
 	for i := range hc.seq {
 		hc.seq[i] = 0
 	}
+	hc.restlsFlow.changeCipher() // #RESTLS#
 	return nil
 }
 
-func (hc *halfConn) setTrafficSecret(suite *cipherSuiteTLS13, secret []byte, clientIn bool) {
+func (hc *halfConn) setTrafficSecret(suite *cipherSuiteTLS13, secret []byte) {
 	hc.trafficSecret = secret
 	key, iv := suite.trafficKey(secret)
 	hc.cipher = suite.aead(key, iv)
-	if clientIn {
-		hc.nextCipher = []any{suite.aead(key, iv)}
-	} else {
-		hc.nextCipher = nil
-	}
+	hc.restlsFlow.setBackupCipher(suite.aead(key, iv)) // #Restls#
+	hc.restlsFlow.changeCipher()                       // #Restls#
 	for i := range hc.seq {
 		hc.seq[i] = 0
 	}
@@ -593,16 +589,15 @@ func (c *Conn) newRecordHeaderError(conn net.Conn, msg string) (err RecordHeader
 	return err
 }
 
-func (c *Conn) readRecord(allowRetry bool) error {
-	return c.readRecordOrCCS(false, allowRetry)
+func (c *Conn) readRecord() error {
+	return c.readRecordOrCCS(false)
 }
 
 func (c *Conn) readChangeCipherSpec() error {
-	// fmt.Printf("readChangeCipherSpec isClient %v\n", c.isClient)
-
-	return c.readRecordOrCCS(true, false)
+	return c.readRecordOrCCS(true)
 }
 
+// #Restls#
 func xorWithMac(record []byte, mac []byte) {
 	lenXor := len(mac)
 	if len(record) < lenXor {
@@ -627,8 +622,7 @@ func xorWithMac(record []byte, mac []byte) {
 //   - c.hand grows
 //   - c.input is set
 //   - an error is returned
-func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool, allowRetry bool) error {
-	// defer fmt.Printf("return from readRecordOrCCS\n")
+func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 	if c.in.err != nil {
 		return c.in.err
 	}
@@ -695,31 +689,27 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool, allowRetry bool) err
 
 	// Process message.
 	record := c.rawInput.Next(recordHeaderLen + n)
+	// #Restls# Begin
 	var data []byte
 	var err error
-	if allowRetry && len(c.in.nextCipher) == 1 && typ != recordTypeChangeCipherSpec {
-		// fmt.Printf("decrypt with retry: %v\n", c.isClient)
-		if len(c.serverRandom) == 0 {
-			panic("len(c.serverRandom) == 0")
-		}
+	if backupCipher := c.in.restlsFlow.expectServerAuth(typ); backupCipher != nil {
 		hmac := macSHA1(c.config.RestlsSecret)
 		hmac.Write(c.serverRandom)
 		serverRandomMac := hmac.Sum(nil)
 		recordCopy := append([]byte(nil), record...)
-		xorWithMac(recordCopy[recordHeaderLen:], serverRandomMac[:restlsMACLength])
+		xorWithMac(recordCopy[recordHeaderLen:], serverRandomMac[:restlsHandshakeMACLength])
 		data, typ, err = c.in.decrypt(recordCopy)
 		if err != nil {
-			c.in.cipher = c.in.nextCipher[0]
-			// fmt.Printf("backup cipher isClient: %v\n", c.isClient)
+			c.in.cipher = backupCipher
 			data, typ, err = c.in.decrypt(record)
 		} else {
 			c.restlsAuthed = true
 		}
 		c.in.nextCipher = nil
 	} else if handshakeComplete && c.restlsAuthed {
-		data, typ = record[recordHeaderLen:], recordTypeApplicationData
+		data, typ = record[recordHeaderLen+8:], recordTypeApplicationData
 	} else {
-		// fmt.Printf("decrypt directly: %v\n", c.isClient)
+		// #Restls# End
 		data, typ, err = c.in.decrypt(record)
 	}
 
@@ -762,7 +752,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool, allowRetry bool) err
 		switch data[0] {
 		case alertLevelWarning:
 			// Drop the record on the floor and retry.
-			return c.retryReadRecord(expectChangeCipherSpec, false)
+			return c.retryReadRecord(expectChangeCipherSpec)
 		case alertLevelError:
 			return c.in.setErrorLocked(&net.OpError{Op: "remote error", Err: alert(data[1])})
 		default:
@@ -771,7 +761,6 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool, allowRetry bool) err
 
 	case recordTypeChangeCipherSpec:
 		if len(data) != 1 || data[0] != 1 {
-			// fmt.Printf("len(data) != 1 || data[0] != 1\n")
 			return c.in.setErrorLocked(c.sendAlert(alertDecodeError))
 		}
 		// Handshake messages are not allowed to fragment across the CCS.
@@ -784,7 +773,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool, allowRetry bool) err
 		// c.vers is still unset. That's not useful though and suspicious if the
 		// server then selects a lower protocol version, so don't allow that.
 		if c.vers == VersionTLS13 {
-			return c.retryReadRecord(expectChangeCipherSpec, allowRetry)
+			return c.retryReadRecord(expectChangeCipherSpec)
 		}
 		if !expectChangeCipherSpec {
 			return c.in.setErrorLocked(c.sendAlert(alertUnexpectedMessage))
@@ -800,7 +789,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool, allowRetry bool) err
 		// Some OpenSSL servers send empty records in order to randomize the
 		// CBC IV. Ignore a limited number of empty records.
 		if len(data) == 0 {
-			return c.retryReadRecord(expectChangeCipherSpec, false)
+			return c.retryReadRecord(expectChangeCipherSpec)
 		}
 		// Note that data is owned by c.rawInput, following the Next call above,
 		// to avoid copying the plaintext. This is safe because c.rawInput is
@@ -819,13 +808,13 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool, allowRetry bool) err
 
 // retryReadRecord recurs into readRecordOrCCS to drop a non-advancing record, like
 // a warning alert, empty application_data, or a change_cipher_spec in TLS 1.3.
-func (c *Conn) retryReadRecord(expectChangeCipherSpec bool, allowRetry bool) error {
+func (c *Conn) retryReadRecord(expectChangeCipherSpec bool) error {
 	c.retryCount++
 	if c.retryCount > maxUselessRecords {
 		c.sendAlert(alertUnexpectedMessage)
 		return c.in.setErrorLocked(errors.New("tls: too many ignored records"))
 	}
-	return c.readRecordOrCCS(expectChangeCipherSpec, allowRetry)
+	return c.readRecordOrCCS(expectChangeCipherSpec)
 }
 
 // atLeastReader reads from R, stopping with EOF once at least N bytes have been
@@ -999,6 +988,7 @@ var outBufPool = sync.Pool{
 	},
 }
 
+// #RESTLS#
 func (c *Conn) writeRestlsApplicationRecord(data []byte) (int, error) {
 	outBufPtr := outBufPool.Get().(*[]byte)
 	outBuf := *outBufPtr
@@ -1027,11 +1017,9 @@ func (c *Conn) writeRestlsApplicationRecord(data []byte) (int, error) {
 		outBuf[3] = byte(m >> 8)
 		outBuf[4] = byte(m)
 
-		if len(c.restlsAuthHeader) > 0 {
-			outBuf = append(outBuf, c.restlsAuthHeader...)
-			m -= len(c.restlsAuthHeader)
-			c.restlsAuthHeader = nil
-		}
+		outBuf = append(outBuf, c.restlsAuthHeader...)
+		m -= len(c.restlsAuthHeader)
+
 		outBuf = append(outBuf, data[:m]...)
 		if _, err := c.write(outBuf); err != nil {
 			return n, err
@@ -1114,9 +1102,9 @@ func (c *Conn) writeRecord(typ recordType, data []byte) (int, error) {
 
 // readHandshake reads the next handshake message from
 // the record layer.
-func (c *Conn) readHandshake(allowRetry bool) (any, error) {
+func (c *Conn) readHandshake() (any, error) {
 	for c.hand.Len() < 4 {
-		if err := c.readRecord(allowRetry); err != nil {
+		if err := c.readRecord(); err != nil {
 			return nil, err
 		}
 	}
@@ -1128,7 +1116,7 @@ func (c *Conn) readHandshake(allowRetry bool) (any, error) {
 		return nil, c.in.setErrorLocked(fmt.Errorf("tls: handshake message of length %d bytes exceeds maximum of %d bytes", n, maxHandshake))
 	}
 	for c.hand.Len() < 4+n {
-		if err := c.readRecord(false); err != nil {
+		if err := c.readRecord(); err != nil {
 			return nil, err
 		}
 	}
@@ -1257,14 +1245,14 @@ func (c *Conn) Write(b []byte) (int, error) {
 			m, b = 1, b[1:]
 		}
 	}
+	// #Restls# Begin
 	if c.restlsAuthed {
 		n, err := c.writeRestlsApplicationRecord(b)
 		return n, c.out.setErrorLocked(err)
-	} else {
-		n, err := c.writeRecordLocked(recordTypeApplicationData, b)
-		return n + m, c.out.setErrorLocked(err)
 	}
-
+	// #Restls# End
+	n, err := c.writeRecordLocked(recordTypeApplicationData, b)
+	return n + m, c.out.setErrorLocked(err)
 }
 
 // handleRenegotiation processes a HelloRequest handshake message.
@@ -1273,7 +1261,7 @@ func (c *Conn) handleRenegotiation() error {
 		return errors.New("tls: internal error: unexpected renegotiation")
 	}
 
-	msg, err := c.readHandshake(false)
+	msg, err := c.readHandshake()
 	if err != nil {
 		return err
 	}
@@ -1319,7 +1307,7 @@ func (c *Conn) handlePostHandshakeMessage() error {
 		return c.handleRenegotiation()
 	}
 
-	msg, err := c.readHandshake(false)
+	msg, err := c.readHandshake()
 	if err != nil {
 		return err
 	}
@@ -1348,7 +1336,7 @@ func (c *Conn) handleKeyUpdate(keyUpdate *keyUpdateMsg) error {
 	}
 
 	newSecret := cipherSuite.nextTrafficSecret(c.in.trafficSecret)
-	c.in.setTrafficSecret(cipherSuite, newSecret, false)
+	c.in.setTrafficSecret(cipherSuite, newSecret)
 
 	if keyUpdate.updateRequested {
 		c.out.Lock()
@@ -1363,7 +1351,7 @@ func (c *Conn) handleKeyUpdate(keyUpdate *keyUpdateMsg) error {
 		}
 
 		newSecret := cipherSuite.nextTrafficSecret(c.out.trafficSecret)
-		c.out.setTrafficSecret(cipherSuite, newSecret, false)
+		c.out.setTrafficSecret(cipherSuite, newSecret)
 	}
 
 	return nil
@@ -1389,7 +1377,7 @@ func (c *Conn) Read(b []byte) (int, error) {
 	defer c.in.Unlock()
 
 	for c.input.Len() == 0 {
-		if err := c.readRecord(false); err != nil {
+		if err := c.readRecord(); err != nil {
 			return 0, err
 		}
 		for c.hand.Len() > 0 {
@@ -1410,7 +1398,7 @@ func (c *Conn) Read(b []byte) (int, error) {
 	// See https://golang.org/cl/76400046 and https://golang.org/issue/3514
 	if n != 0 && c.input.Len() == 0 && c.rawInput.Len() > 0 &&
 		recordType(c.rawInput.Bytes()[0]) == recordTypeAlert {
-		if err := c.readRecord(false); err != nil {
+		if err := c.readRecord(); err != nil {
 			return n, err // will be io.EOF on closeNotify
 		}
 	}
@@ -1643,8 +1631,4 @@ func (c *Conn) VerifyHostname(host string) error {
 		return errors.New("tls: handshake did not verify certificate chain")
 	}
 	return c.peerCertificates[0].VerifyHostname(host)
-}
-
-func (c *Conn) RestlsAuthenticated() bool {
-	return c.restlsAuthed
 }

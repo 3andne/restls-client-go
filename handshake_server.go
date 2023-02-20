@@ -128,7 +128,7 @@ func (hs *serverHandshakeState) handshake() error {
 
 // readClientHello reads a ClientHello message and selects the protocol version.
 func (c *Conn) readClientHello(ctx context.Context) (*clientHelloMsg, error) {
-	msg, err := c.readHandshake(false)
+	msg, err := c.readHandshake()
 	if err != nil {
 		return nil, err
 	}
@@ -569,7 +569,7 @@ func (hs *serverHandshakeState) doFullHandshake() error {
 
 	var pub crypto.PublicKey // public key for client auth, if any
 
-	msg, err := c.readHandshake(false)
+	msg, err := c.readHandshake()
 	if err != nil {
 		return err
 	}
@@ -593,7 +593,7 @@ func (hs *serverHandshakeState) doFullHandshake() error {
 			pub = c.peerCertificates[0].PublicKey
 		}
 
-		msg, err = c.readHandshake(false)
+		msg, err = c.readHandshake()
 		if err != nil {
 			return err
 		}
@@ -631,7 +631,7 @@ func (hs *serverHandshakeState) doFullHandshake() error {
 	// to the client's certificate. This allows us to verify that the client is in
 	// possession of the private key of the certificate.
 	if len(c.peerCertificates) > 0 {
-		msg, err = c.readHandshake(false)
+		msg, err = c.readHandshake()
 		if err != nil {
 			return err
 		}
@@ -693,8 +693,8 @@ func (hs *serverHandshakeState) establishKeys() error {
 		serverCipher = hs.suite.aead(serverKey, serverIV)
 	}
 
-	c.in.prepareCipherSpec(c.vers, []any{clientCipher}, clientHash)
-	c.out.prepareCipherSpec(c.vers, []any{serverCipher}, serverHash)
+	c.in.prepareCipherSpec(c.vers, clientCipher, clientHash)
+	c.out.prepareCipherSpec(c.vers, serverCipher, serverHash)
 
 	return nil
 }
@@ -706,7 +706,7 @@ func (hs *serverHandshakeState) readFinished(out []byte) error {
 		return err
 	}
 
-	msg, err := c.readHandshake(false)
+	msg, err := c.readHandshake()
 	if err != nil {
 		return err
 	}
