@@ -105,12 +105,6 @@ func (hs *clientHandshakeStateTLS13) handshake() error {
 
 	c.isHandshakeComplete.Store(true)
 
-	// #Restls# Begin
-	hash := macSHA1(c.config.RestlsSecret)
-	hash.Write(hs.serverHello.random)
-	hash.Write(hs.serverHello.random)
-	c.restlsAuthHeader = hash.Sum(nil)[:restlsAppDataMACLength]
-	// #Restls# End
 	return nil
 }
 
@@ -627,6 +621,7 @@ func (hs *clientHandshakeStateTLS13) sendClientFinished() error {
 	}
 
 	hs.transcript.Write(finished.marshal())
+	c.out.restlsPlugin.WritingClientFinished() // #Restls#
 	if _, err := c.writeRecord(recordTypeHandshake, finished.marshal()); err != nil {
 		return err
 	}

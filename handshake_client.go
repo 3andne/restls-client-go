@@ -151,7 +151,7 @@ func (c *Conn) generateSessionIDForTLS13(hello *clientHelloMsg) {
 	if c.config.VersionHint != TLS13Hint {
 		panic("session id should only be generated from key share for TLS 1.3")
 	}
-	hmac := macSHA1(c.config.RestlsSecret)
+	hmac := RestlsHmac(c.config.RestlsSecret)
 	group := hello.keyShares[0].group
 	hmac.Write([]byte{byte(group >> 8), byte(group & 255)})
 	hmac.Write(hello.keyShares[0].data)
@@ -166,11 +166,11 @@ func (c *Conn) generateSessionIDFromPKnTicket(hello *clientHelloMsg) {
 	if c.config.VersionHint != TLS12Hint {
 		panic("session id should only be generated from pub key and session ticket for TLS 1.2")
 	}
-	hmac := macSHA1(c.config.RestlsSecret)
+	hmac := RestlsHmac(c.config.RestlsSecret)
 	hmac.Write(c.tls12PubKey)
 	copy(hello.sessionId[restls12PubKeyMACOffset:], hmac.Sum(nil)[:restlsHandshakeMACLength])
 	if len(hello.sessionTicket) > 0 {
-		hmac := macSHA1(c.config.RestlsSecret)
+		hmac := RestlsHmac(c.config.RestlsSecret)
 		hmac.Write(hello.sessionTicket)
 		copy(hello.sessionId[restls12SessionTicketMACOffset:], hmac.Sum(nil)[:restlsHandshakeMACLength])
 	}
@@ -255,8 +255,7 @@ func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 		return errors.New("tls: downgrade attempt detected, possibly due to a MitM attack or a broken middlebox")
 	}
 
-	c.serverRandom = serverHello.random  // #Restls#
-	c.restlsAuthHeader = make([]byte, 8) // #Restls#
+	c.serverRandom = serverHello.random // #Restls#
 	if c.vers == VersionTLS13 {
 		hs := &clientHandshakeStateTLS13{
 			c:           c,
@@ -459,6 +458,8 @@ func (hs *clientHandshakeState) handshake() error {
 
 	c.buffering = true
 	c.didResume = isResume
+
+	c.clientFinishedIsFirst = true // #Restls#
 	if isResume {
 		if err := hs.establishKeys(); err != nil {
 			return err
@@ -895,6 +896,11 @@ func (hs *clientHandshakeState) sendFinished(out []byte) error {
 	finished := new(finishedMsg)
 	finished.verifyData = hs.finishedHash.clientSum(hs.masterSecret)
 	hs.finishedHash.Write(finished.marshal())
+	// #Restls# Begin
+	if !c.clientFinishedIsFirst {
+		c.out.restlsPlugin.WritingClientFinished()
+	}
+	// #Restls# End
 	if _, err := c.writeRecord(recordTypeHandshake, finished.marshal()); err != nil {
 		return err
 	}

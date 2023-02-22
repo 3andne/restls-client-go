@@ -735,9 +735,10 @@ type Config struct {
 	// auto-rotation logic. See Config.ticketKeys.
 	autoSessionTicketKeys []ticketKey
 
-	RestlsSecret []byte  // #RESTLS#
-	VersionHint  uint8   // #RESTLS#
-	CurveIDHint  CurveID // #RESTLS#
+	RestlsSecret       []byte  // #RESTLS#
+	VersionHint        uint8   // #RESTLS#
+	CurveIDHint        CurveID // #RESTLS#
+	Early0x17TargetLen int     // #RESTLS#
 }
 
 const (
@@ -818,9 +819,10 @@ func (c *Config) Clone() *Config {
 		KeyLogWriter:                c.KeyLogWriter,
 		sessionTicketKeys:           c.sessionTicketKeys,
 		autoSessionTicketKeys:       c.autoSessionTicketKeys,
-		CurveIDHint:                 c.CurveIDHint,  // #RESTLS#
-		VersionHint:                 c.VersionHint,  // #RESTLS#
-		RestlsSecret:                c.RestlsSecret, // #RESTLS#
+		CurveIDHint:                 c.CurveIDHint,        // #RESTLS#
+		VersionHint:                 c.VersionHint,        // #RESTLS#
+		RestlsSecret:                c.RestlsSecret,       // #RESTLS#
+		Early0x17TargetLen:          c.Early0x17TargetLen, // #RESTLS#
 	}
 }
 
@@ -1499,8 +1501,11 @@ const (
 
 // #RESTLS#
 const (
-	restlsHandshakeMACLength       uint = 16
-	restlsAppDataMACLength         uint = 8
-	restls12SessionTicketMACOffset uint = 16
-	restls12PubKeyMACOffset        uint = 0
+	restlsHandshakeMACLength       int = 16
+	restlsAppDataMACLength         int = 8
+	restlsAppDataAuthHeaderLength  int = restlsAppDataMACLength + 2
+	restls12SessionTicketMACOffset int = 16
+	restls12PubKeyMACOffset        int = 0
+	restlsAppDataOffset            int = 5 + restlsAppDataAuthHeaderLength
+	restlsAppDataLenOffset         int = 5 + restlsAppDataMACLength
 )
