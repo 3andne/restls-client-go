@@ -292,7 +292,9 @@ func (ka *ecdheKeyAgreement) processServerKeyExchange(config *Config, clientHell
 		return errors.New("tls: server selected unsupported curve")
 	}
 
-	if curveID != config.CurveIDHint { // #Restls#
+	hint := CurveID(config.CurveIDHint.Load()) // #Restls#
+	if curveID != hint {                       // #Restls#
+		config.CurveIDHint.Store(uint32(curveID))                     // #Restls#
 		params, err = generateECDHEParameters(config.rand(), curveID) // #Restls#
 		if err != nil {
 			return err

@@ -22,6 +22,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -735,10 +736,10 @@ type Config struct {
 	// auto-rotation logic. See Config.ticketKeys.
 	autoSessionTicketKeys []ticketKey
 
-	RestlsSecret       []byte  // #RESTLS#
-	VersionHint        uint8   // #RESTLS#
-	CurveIDHint        CurveID // #RESTLS#
-	Early0x17TargetLen int     // #RESTLS#
+	RestlsSecret []byte        // #RESTLS#
+	VersionHint  versionHint   // #RESTLS#
+	CurveIDHint  atomic.Uint32 // #RESTLS#
+	RestlsScript []Line        // #RESTLS#
 }
 
 const (
@@ -819,10 +820,10 @@ func (c *Config) Clone() *Config {
 		KeyLogWriter:                c.KeyLogWriter,
 		sessionTicketKeys:           c.sessionTicketKeys,
 		autoSessionTicketKeys:       c.autoSessionTicketKeys,
-		CurveIDHint:                 c.CurveIDHint,        // #RESTLS#
-		VersionHint:                 c.VersionHint,        // #RESTLS#
-		RestlsSecret:                c.RestlsSecret,       // #RESTLS#
-		Early0x17TargetLen:          c.Early0x17TargetLen, // #RESTLS#
+		CurveIDHint:                 c.CurveIDHint,  // #RESTLS#
+		VersionHint:                 c.VersionHint,  // #RESTLS#
+		RestlsSecret:                c.RestlsSecret, // #RESTLS#
+		RestlsScript:                c.RestlsScript, // #RESTLS#
 	}
 }
 
@@ -1494,18 +1495,26 @@ func isSupportedSignatureAlgorithm(sigAlg SignatureScheme, supportedSignatureAlg
 }
 
 // #RESTLS#
+type versionHint uint8
+
+// #RESTLS#
 const (
-	TLS12Hint uint8 = 12
-	TLS13Hint uint8 = 13
+	TLS12Hint versionHint = 12
+	TLS13Hint versionHint = 13
 )
 
 // #RESTLS#
 const (
 	restlsHandshakeMACLength       int = 16
 	restlsAppDataMACLength         int = 8
-	restlsAppDataAuthHeaderLength  int = restlsAppDataMACLength + 2
+	restlsCmdLength                int = 2
+	restlsMaskLength               int = restlsCmdLength + 2
+	restlsAppDataAuthHeaderLength  int = restlsAppDataMACLength + restlsMaskLength
 	restls12SessionTicketMACOffset int = 16
 	restls12PubKeyMACOffset        int = 0
 	restlsAppDataOffset            int = 5 + restlsAppDataAuthHeaderLength
 	restlsAppDataLenOffset         int = 5 + restlsAppDataMACLength
 )
+
+// #RESTLS#
+var restlsRandomResponseMagic []byte = []byte("restls-random-response")

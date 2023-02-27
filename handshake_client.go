@@ -168,7 +168,8 @@ func (c *Conn) generateSessionIDFromPKnTicket(hello *clientHelloMsg) {
 	}
 	hmac := RestlsHmac(c.config.RestlsSecret)
 	hmac.Write(c.tls12PubKey)
-	copy(hello.sessionId[restls12PubKeyMACOffset:], hmac.Sum(nil)[:restlsHandshakeMACLength])
+	pubkeyhash := hmac.Sum(nil)[:restlsHandshakeMACLength]
+	copy(hello.sessionId[restls12PubKeyMACOffset:], pubkeyhash)
 	if len(hello.sessionTicket) > 0 {
 		hmac := RestlsHmac(c.config.RestlsSecret)
 		hmac.Write(hello.sessionTicket)
@@ -213,12 +214,12 @@ func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 
 	// #Restls# Begin
 	if c.config.VersionHint == TLS12Hint {
-		params, err := generateECDHEParameters(c.config.rand(), c.config.CurveIDHint)
+		hint := CurveID(c.config.CurveIDHint.Load())
+		params, err := generateECDHEParameters(c.config.rand(), hint)
 		if err != nil {
 			return fmt.Errorf("tls: CurvePreferences includes unsupported curve: %v", err)
 		}
 		c.tls12PubKey = params.PublicKey()
-		// fmt.Printf("c.tls12PubKey %v", c.tls12PubKey)
 		c.eagerEcdheParameters = &params
 		c.generateSessionIDFromPKnTicket(hello)
 	}
