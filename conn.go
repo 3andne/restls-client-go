@@ -124,6 +124,8 @@ type Conn struct {
 	restlsAuthed          bool             // #RESTLS#
 	restlsInboundCounter  uint32           // #RESTLS#
 	restlsOutboundCounter uint32           // #RESTLS#
+	restlsSendBuf         []byte           // #RESTLS#
+	restlsWritePending    atomic.Bool      // #RESTLS#
 }
 
 // Access to net.Conn methods.
@@ -644,19 +646,22 @@ func (c *Conn) extractRestlsAppData(record []byte) ([]byte, restlsCommand, error
 		return nil, nil, err
 	}
 	data := record[restlsAppDataOffset : restlsAppDataOffset+dataLen]
-	// fmt.Printf("extractRestlsAppData: lengthMask: %v, length: %v, authMac: %v, to_server: %d, to_client: %d\n", mask, dataLen, authMac, c.restlsOutboundCounter, c.restlsInboundCounter)
+	// fmt.Printf("extractRestlsAppData: lengthMask: %v, recordLen: %v, dataLen: %v, authMac: %v, to_server: %d, to_client: %d\n", mask, len(record), dataLen, authMac, c.restlsOutboundCounter, c.restlsInboundCounter)
 	return data, command, nil
 }
 
 // #Restls#
-func (c *Conn) handleRestlsCommand(command restlsCommand) {
+func (c *Conn) handleRestlsCommand(command restlsCommand, sent bool) {
 	if command == nil {
 		return
 	}
 	switch command := command.(type) {
 	case ActResponse:
+		if sent {
+			command -= 1
+		}
 		for i := 0; i < int(command); i++ {
-			go c.Write(restlsRandomResponseMagic)
+			c.Write(restlsRandomResponseMagic)
 		}
 	case ActNoop:
 		return
@@ -770,8 +775,14 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 		} else {
 			data, command, err = c.extractRestlsAppData(record)
 		}
+		n := 0
+		if c.restlsWritePending.Swap(false) {
+			// fmt.Printf("restls unblock writers, len %d\n", len(data))
+			n, err = c.Write([]byte{})
+		}
 		c.restlsInboundCounter += 1
-		c.handleRestlsCommand(command)
+		c.handleRestlsCommand(command, n > 0)
+		// fmt.Printf("c.handleRestlsCommand returned\n")
 	} else {
 		// #Restls# End
 		data, typ, err = c.in.decrypt(record)
@@ -1135,7 +1146,7 @@ func (c *Conn) actAccordingToScript(data []byte) (int, int, int, restlsCommand) 
 }
 
 // #RESTLS#
-func (c *Conn) writeRestlsApplicationRecord(data []byte) (int, error) {
+func (c *Conn) writeRestlsApplicationRecord(dataNew []byte) (int, error) {
 	outBufPtr := outBufPool.Get().(*[]byte)
 	outBuf := *outBufPtr
 	defer func() {
@@ -1147,14 +1158,32 @@ func (c *Conn) writeRestlsApplicationRecord(data []byte) (int, error) {
 		*outBufPtr = outBuf
 		outBufPool.Put(outBufPtr)
 	}()
+	fakeResponse := false
+	if bytes.Equal(dataNew, restlsRandomResponseMagic) {
+		// fmt.Printf("writeRestls writing random response\n")
+		fakeResponse = true
+		dataNew = []byte{}
+		c.restlsWritePending.Store(false)
+	}
+
+	if c.restlsWritePending.Load() {
+		c.restlsSendBuf = append(c.restlsSendBuf, dataNew...)
+		return len(dataNew), nil
+	}
+
+	var data []byte
+	if len(c.restlsSendBuf) > 0 {
+		// fmt.Println("writeRestlsApplicationRecord writing pending data")
+		c.restlsSendBuf = append(c.restlsSendBuf, dataNew...)
+		data = c.restlsSendBuf
+	} else {
+		data = dataNew
+	}
 
 	var n int
-	for len(data) > 0 {
-		if bytes.Equal(data, restlsRandomResponseMagic) {
-			data = []byte{}
-		}
+	for len(data) > 0 || fakeResponse {
 		payloadLen, dataLen, paddingLen, command := c.actAccordingToScript(data)
-		// fmt.Printf("payloadLen %d, dataLen %d, paddingLen %d, command %v, dataSize %d\n", payloadLen, dataLen, paddingLen, command, len(data))
+		// fmt.Printf("writeRestls payloadLen %d, dataLen %d, paddingLen %d, command %v, dataSize %d\n", payloadLen, dataLen, paddingLen, command, len(data))
 		if payloadLen == 0 {
 			return 0, nil
 		}
@@ -1169,17 +1198,39 @@ func (c *Conn) writeRestlsApplicationRecord(data []byte) (int, error) {
 		outBuf = append(outBuf, data[:dataLen]...)
 		var err error
 		if outBuf, err = c.write0x17AuthHeader(paddingLen, dataLen, command, outBuf); err != nil {
+			// fmt.Printf("write0x17AuthHeader failed %v", err)
 			return n, err
 		}
+		if command.needInterrupt() && !fakeResponse {
+			c.restlsWritePending.Store(true)
+		}
 		if _, err = c.write(outBuf); err != nil {
+			// fmt.Printf("writeRestls c.write failed %v", err)
 			return n, err
 		}
 		c.restlsOutboundCounter += 1
-		n += dataLen
+		n += payloadLen
 		data = data[dataLen:]
+		if command.needInterrupt() && !fakeResponse {
+			// fmt.Printf("restls write [%d] blocked, remaining %d\n", c.restlsOutboundCounter, len(data))
+			break
+		}
+		fakeResponse = false
 	}
 
-	return n, nil
+	if len(data) > 0 {
+		if len(c.restlsSendBuf) < len(data) {
+			if len(c.restlsSendBuf) > 0 {
+				panic("unexpected situation")
+			}
+			c.restlsSendBuf = append(c.restlsSendBuf, data...)
+		} else {
+			copy(c.restlsSendBuf, data)
+		}
+	}
+	c.restlsSendBuf = c.restlsSendBuf[:len(data)]
+
+	return len(dataNew), nil
 }
 
 // writeRecordLocked writes a TLS record with the given type and payload to the

@@ -88,6 +88,7 @@ type Line struct {
 
 type restlsCommand interface {
 	toBytes() [2]byte
+	needInterrupt() bool
 }
 
 type ActResponse int8
@@ -96,10 +97,18 @@ func (a ActResponse) toBytes() [2]byte {
 	return [2]byte{0x01, byte(a)}
 }
 
+func (a ActResponse) needInterrupt() bool {
+	return true
+}
+
 type ActNoop struct{}
 
 func (a ActNoop) toBytes() [2]byte {
 	return [2]byte{0x00, 0}
+}
+
+func (a ActNoop) needInterrupt() bool {
+	return false
 }
 
 func parseCommand(buf []byte) (restlsCommand, error) {
