@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/refraction-networking/utls/testenv"
+	"github.com/3andne/restls-client-go/testenv"
 )
 
 var rsaCertPEM = `-----BEGIN CERTIFICATE-----
