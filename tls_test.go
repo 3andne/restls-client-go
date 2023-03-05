@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -832,6 +833,20 @@ func TestCloneNonFuncFields(t *testing.T) {
 			continue // these are unexported fields that are handled separately
 		case "ApplicationSettings":
 			f.Set(reflect.ValueOf(map[string][]byte{"a": {1}}))
+		// #Restls# Begin
+		case "RestlsSecret":
+			f.Set(reflect.ValueOf([]byte{'1', '2', '3', '4', '5'}))
+		case "VersionHint":
+			f.Set(reflect.ValueOf(TLS12Hint))
+		case "CurveIDHint":
+			hint := atomic.Uint32{}
+			hint.Store(uint32(CurveP256))
+			f.Set(reflect.ValueOf(hint))
+		case "RestlsScript":
+			f.Set(reflect.ValueOf([]Line{{TargetLength{100, 0}, ActNoop{}}}))
+		case "ClientID":
+			f.Set(reflect.ValueOf(&HelloChrome_Auto))
+		// #Restls# End
 		default:
 			t.Errorf("all fields must be accounted for, but saw unknown field %q", fn)
 		}

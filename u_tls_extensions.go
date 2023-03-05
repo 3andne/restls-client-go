@@ -150,7 +150,7 @@ type SupportedCurvesExtension struct {
 }
 
 func (e *SupportedCurvesExtension) writeToUConn(uc *UConn) error {
-	uc.config.CurvePreferences = e.Curves
+	//// uc.config.CurvePreferences = e.Curves // #Restls#
 	uc.HandshakeState.Hello.SupportedCurves = e.Curves
 	return nil
 }

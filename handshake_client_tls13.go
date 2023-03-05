@@ -720,6 +720,7 @@ func (hs *clientHandshakeStateTLS13) sendClientFinished() error {
 	}
 
 	hs.transcript.Write(finished.marshal())
+	c.out.restlsPlugin.WritingClientFinished() // #Restls#
 	if _, err := c.writeRecord(recordTypeHandshake, finished.marshal()); err != nil {
 		return err
 	}

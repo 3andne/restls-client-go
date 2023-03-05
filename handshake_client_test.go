@@ -2595,3 +2595,33 @@ func TestClientHandshakeContextCancellation(t *testing.T) {
 		t.Error("Client connection was not closed when the context was canceled")
 	}
 }
+
+// func TestResTLS13(t *testing.T) {
+// 	clientConfig := testConfig.Clone()
+// 	clientConfig.VersionHint = TLS13Hint
+// 	clientConfig.RestlsSecret = []byte("12345")
+
+// 	test := &clientTest{
+// 		name:   "AES256-SHA384",
+// 		args:   []string{"-ciphersuites", "TLS_AES_256_GCM_SHA384"},
+// 		config: clientConfig,
+// 	}
+
+// 	runClientTestTLS13(t, test)
+// }
+
+// func TestResTLS12(t *testing.T) {
+// 	clientConfig := testConfig.Clone()
+// 	clientConfig.VersionHint = TLS12Hint
+// 	clientConfig.RestlsSecret = []byte("12345")
+// 	clientConfig.CurveIDHint = X25519
+// 	clientConfig.CurvePreferences = []CurveID{X25519}
+
+// 	test := &clientTest{
+// 		name:   "X25519-ECDHE",
+// 		args:   []string{"-cipher", "ECDHE-RSA-AES128-GCM-SHA256", "-curves", "X25519"},
+// 		config: clientConfig,
+// 	}
+
+// 	runClientTestTLS12(t, test)
+// }

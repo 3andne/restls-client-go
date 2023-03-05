@@ -52,6 +52,8 @@ func UClient(conn net.Conn, config *Config, clientHelloID ClientHelloID) *UConn 
 	uconn := UConn{Conn: &tlsConn, ClientHelloID: clientHelloID, HandshakeState: handshakeState}
 	uconn.HandshakeState.uconn = &uconn
 	uconn.handshakeFn = uconn.clientHandshake
+	uconn.in.restlsPlugin.initAsClientInbound()   // #Restls#
+	uconn.out.restlsPlugin.initAsClientOutbound() // #Restls#
 	return &uconn
 }
 
@@ -72,6 +74,7 @@ func UClient(conn net.Conn, config *Config, clientHelloID ClientHelloID) *UConn 
 // default/mimicked ClientHello.
 func (uconn *UConn) BuildHandshakeState() error {
 	if uconn.ClientHelloID == HelloGolang {
+		panic("Golang ClientHello is disabled") // #Restls#
 		if uconn.ClientHelloBuilt {
 			return nil
 		}
@@ -349,6 +352,13 @@ func (c *UConn) Write(b []byte) (int, error) {
 		}
 	}
 
+	// #Restls# Begin
+	if c.restlsAuthed {
+		n, err := c.writeRestlsApplicationRecord(b)
+		return n, c.out.setErrorLocked(err)
+	}
+	// #Restls# End
+
 	n, err := c.writeRecordLocked(recordTypeApplicationData, b)
 	return n + m, c.out.setErrorLocked(err)
 }
@@ -399,6 +409,20 @@ func (c *UConn) clientHandshake(ctx context.Context) (err error) {
 	}
 	// [uTLS section ends]
 
+	// #Restls# Begin
+	// fmt.Printf("hello.keyShares(private) %v\n", hello.keyShares)
+	supportTLS13 := false
+	for _, v := range hello.supportedVersions {
+		if v == VersionTLS13 {
+			supportTLS13 = true
+			break
+		}
+	}
+	if c.config.VersionHint == TLS13Hint && supportTLS13 {
+		c.generateSessionIDForTLS13(hello)
+	}
+	// #Restls# End
+
 	cacheKey, session, earlySecret, binderKey := c.loadSession(hello)
 	if cacheKey != "" && session != nil {
 		defer func() {
@@ -413,6 +437,16 @@ func (c *UConn) clientHandshake(ctx context.Context) (err error) {
 			}
 		}()
 	}
+
+	// #Restls# Begin
+	if c.config.VersionHint == TLS12Hint || c.config.VersionHint == TLS13Hint && !supportTLS13 {
+		if err := c.generateSessionIDForTLS12(hello); err != nil {
+			return err
+		}
+	}
+	// fmt.Printf("%v, %v, %v\n", c.HandshakeState.Hello.SessionId, hello.sessionId, hello.raw[39:39+32])
+	copy(hello.raw[39:], hello.sessionId) // patch session id
+	// #Restls# End
 
 	if !sessionIsAlreadySet { // uTLS: do not overwrite already set session
 		err = c.SetSessionState(session)
@@ -439,6 +473,8 @@ func (c *UConn) clientHandshake(ctx context.Context) (err error) {
 	if err := c.pickTLSVersion(serverHello); err != nil {
 		return err
 	}
+
+	c.serverRandom = serverHello.random // #Restls#
 
 	// uTLS: do not create new handshakeState, use existing one
 	if c.vers == VersionTLS13 {

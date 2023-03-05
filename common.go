@@ -22,6 +22,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -753,6 +754,12 @@ type Config struct {
 	// autoSessionTicketKeys is like sessionTicketKeys but is owned by the
 	// auto-rotation logic. See Config.ticketKeys.
 	autoSessionTicketKeys []ticketKey
+
+	RestlsSecret []byte         // #RESTLS#
+	VersionHint  versionHint    // #RESTLS#
+	CurveIDHint  atomic.Uint32  // #RESTLS#
+	RestlsScript []Line         // #RESTLS#
+	ClientID     *ClientHelloID // #RESTLS#
 }
 
 const (
@@ -835,6 +842,11 @@ func (c *Config) Clone() *Config {
 		KeyLogWriter:                c.KeyLogWriter,
 		sessionTicketKeys:           c.sessionTicketKeys,
 		autoSessionTicketKeys:       c.autoSessionTicketKeys,
+		CurveIDHint:                 c.CurveIDHint,  // #RESTLS#
+		VersionHint:                 c.VersionHint,  // #RESTLS#
+		RestlsSecret:                c.RestlsSecret, // #RESTLS#
+		RestlsScript:                c.RestlsScript, // #RESTLS#
+		ClientID:                    c.ClientID,     // #RESTLS#
 	}
 }
 
@@ -1504,3 +1516,29 @@ func isSupportedSignatureAlgorithm(sigAlg SignatureScheme, supportedSignatureAlg
 	}
 	return false
 }
+
+// #RESTLS#
+type versionHint uint8
+
+// #RESTLS#
+const (
+	TLS12Hint versionHint = 12
+	TLS13Hint versionHint = 13
+)
+
+// #RESTLS#
+const (
+	restlsHandshakeMACLength      int = 16
+	restlsAppDataMACLength        int = 8
+	restlsCmdLength               int = 2
+	restlsMaskLength              int = restlsCmdLength + 2
+	restlsAppDataAuthHeaderLength int = restlsAppDataMACLength +
+		restlsMaskLength
+	restls12SessionTicketMACOffset int = 16
+	restls12PubKeyMACOffset        int = 0
+	restlsAppDataOffset            int = 5 + restlsAppDataAuthHeaderLength
+	restlsAppDataLenOffset         int = 5 + restlsAppDataMACLength
+)
+
+// #RESTLS#
+var restlsRandomResponseMagic []byte = []byte("restls-random-response")

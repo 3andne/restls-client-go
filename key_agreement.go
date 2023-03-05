@@ -30,7 +30,7 @@ type keyAgreement interface {
 
 	// This method may not be called if the server doesn't send a
 	// ServerKeyExchange message.
-	processServerKeyExchange(*Config, *clientHelloMsg, *serverHelloMsg, *x509.Certificate, *serverKeyExchangeMsg) error
+	processServerKeyExchange(*Config, *clientHelloMsg, *serverHelloMsg, *x509.Certificate, *serverKeyExchangeMsg, *ecdheParameters /* #Restls# */) error
 	generateClientKeyExchange(*Config, *clientHelloMsg, *x509.Certificate) ([]byte, *clientKeyExchangeMsg, error)
 }
 
@@ -73,7 +73,7 @@ func (ka rsaKeyAgreement) processClientKeyExchange(config *Config, cert *Certifi
 	return preMasterSecret, nil
 }
 
-func (ka rsaKeyAgreement) processServerKeyExchange(config *Config, clientHello *clientHelloMsg, serverHello *serverHelloMsg, cert *x509.Certificate, skx *serverKeyExchangeMsg) error {
+func (ka rsaKeyAgreement) processServerKeyExchange(config *Config, clientHello *clientHelloMsg, serverHello *serverHelloMsg, cert *x509.Certificate, skx *serverKeyExchangeMsg, eagerParam *ecdheParameters /* #Restls# */) error {
 	return errors.New("tls: unexpected ServerKeyExchange")
 }
 
@@ -267,7 +267,7 @@ func (ka *ecdheKeyAgreement) processClientKeyExchange(config *Config, cert *Cert
 	return preMasterSecret, nil
 }
 
-func (ka *ecdheKeyAgreement) processServerKeyExchange(config *Config, clientHello *clientHelloMsg, serverHello *serverHelloMsg, cert *x509.Certificate, skx *serverKeyExchangeMsg) error {
+func (ka *ecdheKeyAgreement) processServerKeyExchange(config *Config, clientHello *clientHelloMsg, serverHello *serverHelloMsg, cert *x509.Certificate, skx *serverKeyExchangeMsg, paramsPtr *ecdheParameters /* #Restls# */) (err /* #Restls# */ error) {
 	if len(skx.key) < 4 {
 		return errServerKeyExchange
 	}
@@ -292,10 +292,16 @@ func (ka *ecdheKeyAgreement) processServerKeyExchange(config *Config, clientHell
 		return errors.New("tls: server selected unsupported curve")
 	}
 
-	params, err := generateECDHEParameters(config.rand(), curveID)
-	if err != nil {
-		return err
-	}
+	hint := CurveID(config.CurveIDHint.Load()) // #Restls#
+	if curveID != hint || paramsPtr == nil {   // #Restls#
+		config.CurveIDHint.Store(uint32(curveID))                    // #Restls#
+		pTmp, err := generateECDHEParameters(config.rand(), curveID) // #Restls#
+		paramsPtr = &pTmp                                            // #Restls#
+		if err != nil {
+			return err
+		}
+	} // #Restls#
+	params := *paramsPtr // #Restls#
 	ka.params = params
 
 	ka.preMasterSecret = params.SharedKey(publicKey)

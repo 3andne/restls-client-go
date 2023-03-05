@@ -152,6 +152,48 @@ func (c *Conn) makeClientHello() (*clientHelloMsg, ecdheParameters, error) {
 	return hello, params, nil
 }
 
+// #Restls#
+func (c *Conn) generateSessionIDForTLS13(hello *clientHelloMsg) {
+	if c.config.VersionHint != TLS13Hint {
+		panic("session id should only be generated from key share for TLS 1.3")
+	}
+	hmac := RestlsHmac(c.config.RestlsSecret)
+	for _, ks := range hello.keyShares {
+		group := ks.group
+		hmac.Write([]byte{byte(group >> 8), byte(group & 255)})
+		hmac.Write(ks.data)
+	}
+	for _, psk := range hello.pskIdentities {
+		hmac.Write(psk.label)
+	}
+	copy(hello.sessionId[:], hmac.Sum(nil)[:restlsHandshakeMACLength])
+	// fmt.Printf("generated session id: %v\n", hello.sessionId)
+}
+
+// #Restls#
+func (c *Conn) generateSessionIDForTLS12(hello *clientHelloMsg) error {
+	if c.config.VersionHint != TLS12Hint && hello.supportedVersions[0] != VersionTLS12 {
+		panic("session id should only be generated from pub key and session ticket for TLS 1.2")
+	}
+	hint := CurveID(c.config.CurveIDHint.Load())
+	params, err := generateECDHEParameters(c.config.rand(), hint)
+	if err != nil {
+		return fmt.Errorf("restls: CurvePreferences includes unsupported curve: %v", err)
+	}
+	c.tls12PubKey = params.PublicKey()
+	c.eagerEcdheParameters = &params
+	hmac := RestlsHmac(c.config.RestlsSecret)
+	hmac.Write(c.tls12PubKey)
+	pubkeyhash := hmac.Sum(nil)[:restlsHandshakeMACLength]
+	copy(hello.sessionId[restls12PubKeyMACOffset:], pubkeyhash)
+	if len(hello.sessionTicket) > 0 {
+		hmac := RestlsHmac(c.config.RestlsSecret)
+		hmac.Write(hello.sessionTicket)
+		copy(hello.sessionId[restls12SessionTicketMACOffset:], hmac.Sum(nil)[:restlsHandshakeMACLength])
+	}
+	return nil
+}
+
 func (c *Conn) clientHandshake(ctx context.Context) (err error) {
 	if c.config == nil {
 		c.config = defaultConfig()
@@ -352,6 +394,11 @@ func (c *Conn) loadSession(hello *clientHelloMsg) (cacheKey string,
 	}
 	hello.pskIdentities = []pskIdentity{identity}
 	hello.pskBinders = [][]byte{make([]byte, cipherSuite.hash.Size())}
+	// #Restls# Begin
+	if c.config.VersionHint == TLS13Hint && hello.supportedVersions[0] == VersionTLS13 {
+		c.generateSessionIDForTLS13(hello)
+	}
+	// #Restls# End
 
 	// Compute the PSK binders. See RFC 8446, Section 4.2.11.2.
 	psk := cipherSuite.expandLabel(session.masterSecret, "resumption",
@@ -411,6 +458,7 @@ func (hs *clientHandshakeState) handshake() error {
 
 	c.buffering = true
 	c.didResume = isResume
+	c.clientFinishedIsFirst = true // #Restls#
 	if isResume {
 		if err := hs.establishKeys(); err != nil {
 			return err
@@ -541,7 +589,7 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 	skx, ok := msg.(*serverKeyExchangeMsg)
 	if ok {
 		hs.finishedHash.Write(skx.marshal())
-		err = keyAgreement.processServerKeyExchange(c.config, hs.hello, hs.serverHello, c.peerCertificates[0], skx)
+		err = keyAgreement.processServerKeyExchange(c.config, hs.hello, hs.serverHello, c.peerCertificates[0], skx, c.eagerEcdheParameters /* #Restls# */)
 		if err != nil {
 			c.sendAlert(alertUnexpectedMessage)
 			return err
@@ -680,18 +728,21 @@ func (hs *clientHandshakeState) establishKeys() error {
 	clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
 		keysFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.hello.random, hs.serverHello.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
 	var clientCipher, serverCipher any
+	var serverCipher2 any // #Restls#
 	var clientHash, serverHash hash.Hash
 	if hs.suite.cipher != nil {
 		clientCipher = hs.suite.cipher(clientKey, clientIV, false /* not for reading */)
 		clientHash = hs.suite.mac(clientMAC)
 		serverCipher = hs.suite.cipher(serverKey, serverIV, true /* for reading */)
+		serverCipher2 = hs.suite.cipher(serverKey, serverIV, true) // #Restls#
 		serverHash = hs.suite.mac(serverMAC)
 	} else {
 		clientCipher = hs.suite.aead(clientKey, clientIV)
 		serverCipher = hs.suite.aead(serverKey, serverIV)
+		serverCipher2 = hs.suite.aead(serverKey, serverIV) // #Restls#
 	}
 
-	c.in.prepareCipherSpec(c.vers, serverCipher, serverHash)
+	c.in.prepareCipherSpec(c.vers, serverCipher, serverHash, serverCipher2 /* #Restls# */)
 	c.out.prepareCipherSpec(c.vers, clientCipher, clientHash)
 	return nil
 }
@@ -856,6 +907,11 @@ func (hs *clientHandshakeState) sendFinished(out []byte) error {
 	finished := new(finishedMsg)
 	finished.verifyData = hs.finishedHash.clientSum(hs.masterSecret)
 	hs.finishedHash.Write(finished.marshal())
+	// #Restls# Begin
+	if !c.clientFinishedIsFirst {
+		c.out.restlsPlugin.WritingClientFinished()
+	}
+	// #Restls# End
 	if _, err := c.writeRecord(recordTypeHandshake, finished.marshal()); err != nil {
 		return err
 	}

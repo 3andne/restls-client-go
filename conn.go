@@ -12,10 +12,12 @@ import (
 	"crypto/cipher"
 	"crypto/subtle"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash"
 	"io"
+	"math/rand"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -120,6 +122,15 @@ type Conn struct {
 	activeCall int32
 
 	tmp [16]byte
+
+	tls12PubKey           []byte           // #RESTLS#
+	eagerEcdheParameters  *ecdheParameters // #RESTLS#
+	serverRandom          []byte           // #RESTLS#
+	restlsAuthed          bool             // #RESTLS#
+	restlsInboundCounter  uint32           // #RESTLS#
+	restlsOutboundCounter uint32           // #RESTLS#
+	restlsSendBuf         []byte           // #RESTLS#
+	restlsWritePending    atomic.Bool      // #RESTLS#
 }
 
 // Access to net.Conn methods.
@@ -180,6 +191,8 @@ type halfConn struct {
 	nextMac    hash.Hash // next MAC algorithm
 
 	trafficSecret []byte // current TLS 1.3 traffic secret
+
+	restlsPlugin RestlsPlugin // #Restls#
 }
 
 type permanentError struct {
@@ -202,10 +215,11 @@ func (hc *halfConn) setErrorLocked(err error) error {
 
 // prepareCipherSpec sets the encryption and MAC states
 // that a subsequent changeCipherSpec will use.
-func (hc *halfConn) prepareCipherSpec(version uint16, cipher any, mac hash.Hash) {
+func (hc *halfConn) prepareCipherSpec(version uint16, cipher any, mac hash.Hash, backupCipher ...any /* #Restls# */) {
 	hc.version = version
 	hc.nextCipher = cipher
 	hc.nextMac = mac
+	hc.restlsPlugin.setBackupCipher(backupCipher...) // #Restls#
 }
 
 // changeCipherSpec changes the encryption and MAC states
@@ -221,6 +235,7 @@ func (hc *halfConn) changeCipherSpec() error {
 	for i := range hc.seq {
 		hc.seq[i] = 0
 	}
+	hc.restlsPlugin.changeCipher() // #RESTLS#
 	return nil
 }
 
@@ -228,6 +243,8 @@ func (hc *halfConn) setTrafficSecret(suite *cipherSuiteTLS13, secret []byte) {
 	hc.trafficSecret = secret
 	key, iv := suite.trafficKey(secret)
 	hc.cipher = suite.aead(key, iv)
+	hc.restlsPlugin.setBackupCipher(suite.aead(key, iv)) // #Restls#
+	hc.restlsPlugin.changeCipher()                       // #Restls#
 	for i := range hc.seq {
 		hc.seq[i] = 0
 	}
@@ -590,6 +607,74 @@ func (c *Conn) readChangeCipherSpec() error {
 	return c.readRecordOrCCS(true)
 }
 
+// #Restls#
+func xorWithMac(record []byte, mac []byte) {
+	lenXor := len(mac)
+	if len(record) < lenXor {
+		lenXor = len(record)
+	}
+	for i := 0; i < lenXor; i += 1 {
+		record[i] = record[i] ^ mac[i]
+	}
+}
+
+// #Restls#
+func (c *Conn) extractRestlsAppData(record []byte) ([]byte, restlsCommand, error) {
+	if recordType(record[0]) != recordTypeApplicationData {
+		// fmt.Printf("extractRestlsAppData: bad recordType\n")
+		return nil, nil, alertUnexpectedMessage
+	}
+	if len(record) < restlsAppDataOffset {
+		return nil, nil, alertBadRecordMAC
+	}
+
+	hmacAuth := c.restlsAuthHeaderHash(true)
+	hmacAuth.Write(record[restlsAppDataLenOffset:])
+	authMac := hmacAuth.Sum(nil)[:restlsAppDataMACLength]
+	for i, m := range authMac {
+		if m != record[5+i] {
+			// fmt.Printf("extractRestlsAppData: bad authMac, expect %v, actual %v, to_server: %d, to_client: %d\n", authMac, record[5:5+restlsAppDataMACLength], c.restlsOutboundCounter, c.restlsInboundCounter)
+			return nil, nil, alertBadRecordMAC
+		}
+	}
+	hmacMask := c.restlsAuthHeaderHash(true)
+	sampleSize := 32
+	if sampleSize > len(record[restlsAppDataOffset:]) {
+		sampleSize = len(record[restlsAppDataOffset:])
+	}
+	hmacMask.Write(record[restlsAppDataOffset : restlsAppDataOffset+sampleSize])
+	mask := hmacMask.Sum(nil)[:restlsMaskLength]
+	xorWithMac(record[restlsAppDataLenOffset:], mask)
+	dataLen := int(binary.BigEndian.Uint16(record[restlsAppDataLenOffset:]))
+	command, err := parseCommand(record[restlsAppDataLenOffset+2:])
+	if err != nil {
+		return nil, nil, err
+	}
+	data := record[restlsAppDataOffset : restlsAppDataOffset+dataLen]
+	// fmt.Printf("extractRestlsAppData: lengthMask: %v, recordLen: %v, dataLen: %v, authMac: %v, to_server: %d, to_client: %d\n", mask, len(record), dataLen, authMac, c.restlsOutboundCounter, c.restlsInboundCounter)
+	return data, command, nil
+}
+
+// #Restls#
+func (c *Conn) handleRestlsCommand(command restlsCommand, sent bool) {
+	if command == nil {
+		return
+	}
+	switch command := command.(type) {
+	case ActResponse:
+		if sent {
+			command -= 1
+		}
+		for i := 0; i < int(command); i++ {
+			c.Write(restlsRandomResponseMagic)
+		}
+	case ActNoop:
+		return
+	default:
+		panic("invalid command")
+	}
+}
+
 // readRecordOrCCS reads one or more TLS records from the connection and
 // updates the record layer state. Some invariants:
 //   - c.in must be locked
@@ -671,7 +756,42 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 
 	// Process message.
 	record := c.rawInput.Next(recordHeaderLen + n)
-	data, typ, err := c.in.decrypt(record)
+	// #Restls# Begin
+	var data []byte
+	var err error
+	var command restlsCommand = ActNoop{}
+	if backupCipher := c.in.restlsPlugin.expectServerAuth(typ); backupCipher != nil {
+		hmac := RestlsHmac(c.config.RestlsSecret)
+		hmac.Write(c.serverRandom)
+		serverRandomMac := hmac.Sum(nil)
+		recordCopy := append([]byte(nil), record...)
+		xorWithMac(recordCopy[recordHeaderLen:], serverRandomMac[:restlsHandshakeMACLength])
+		data, typ, err = c.in.decrypt(recordCopy)
+		if err != nil {
+			c.in.cipher = backupCipher
+			data, typ, err = c.in.decrypt(record)
+		} else {
+			c.restlsAuthed = true
+		}
+		c.in.nextCipher = nil
+	} else if handshakeComplete && c.restlsAuthed {
+		if typ == recordTypeAlert {
+			data = []byte{02, 20}
+		} else {
+			data, command, err = c.extractRestlsAppData(record)
+		}
+		n := 0
+		if c.restlsWritePending.Swap(false) {
+			// fmt.Printf("restls unblock writers, len %d\n", len(data))
+			n, err = c.Write([]byte{})
+		}
+		c.restlsInboundCounter += 1
+		c.handleRestlsCommand(command, n > 0)
+		// fmt.Printf("c.handleRestlsCommand returned\n")
+	} else {
+		// #Restls# End
+		data, typ, err = c.in.decrypt(record)
+	}
 	if err != nil {
 		return c.in.setErrorLocked(c.sendAlert(err.(alert)))
 	}
@@ -991,6 +1111,7 @@ func (c *Conn) writeRecordLocked(typ recordType, data []byte) (int, error) {
 		if err != nil {
 			return n, err
 		}
+		c.out.restlsPlugin.captureClientFinished(outBuf) // #Restls#
 		if _, err := c.write(outBuf); err != nil {
 			return n, err
 		}
@@ -1113,6 +1234,176 @@ var (
 	errShutdown = errors.New("tls: protocol is shutdown")
 )
 
+// #RESTLS#
+func (c *Conn) restlsAuthHeaderHash(isInbound bool) hash.Hash {
+	hmac := RestlsHmac(c.config.RestlsSecret)
+	hmac.Write(c.serverRandom)
+	counterBytes := make([]byte, 4)
+	if isInbound {
+		hmac.Write([]byte("server-to-client"))
+		binary.BigEndian.PutUint32(counterBytes, c.restlsInboundCounter)
+	} else {
+		hmac.Write([]byte("client-to-server"))
+		binary.BigEndian.PutUint32(counterBytes, c.restlsOutboundCounter)
+	}
+	hmac.Write(counterBytes)
+	return hmac
+}
+
+// #RESTLS#
+func (c *Conn) write0x17AuthHeader(paddingLen int, dataLen int, command restlsCommand, outBuf []byte) ([]byte, error) {
+	outBuf, padding := sliceForAppend(outBuf, paddingLen)
+	_, err := rand.Read(padding)
+	if err != nil {
+		return nil, err
+	}
+
+	sampleSize := 32
+	if sampleSize > len(outBuf[restlsAppDataOffset:]) {
+		sampleSize = len(outBuf[restlsAppDataOffset:])
+	}
+	hmacMask := c.restlsAuthHeaderHash(false)
+	_, err = hmacMask.Write(outBuf[restlsAppDataOffset : restlsAppDataOffset+sampleSize])
+	if err != nil {
+		return nil, err
+	}
+	mask := hmacMask.Sum(nil)[:restlsMaskLength]
+	dataLenBytes := outBuf[restlsAppDataLenOffset : restlsAppDataLenOffset+2]
+	binary.BigEndian.PutUint16(dataLenBytes, uint16(dataLen))
+	commandBytes := command.toBytes()
+	copy(outBuf[restlsAppDataLenOffset+2:], commandBytes[:])
+	xorWithMac(outBuf[restlsAppDataLenOffset:], mask)
+	hmacAuth := c.restlsAuthHeaderHash(false)
+	if clientFinished := c.out.restlsPlugin.takeClientFinished(); clientFinished != nil {
+		// fmt.Printf("writing clientFinished %v\n", clientFinished)
+		hmacAuth.Write(clientFinished)
+	}
+	_, err = hmacAuth.Write(outBuf[restlsAppDataLenOffset:]) // data len as well as the data are protected
+	if err != nil {
+		return nil, err
+	}
+	authMac := hmacAuth.Sum(nil)[:restlsAppDataMACLength]
+	// fmt.Printf("lengthMask: %v, authMac: %v, to_server: %d, to_client: %d\n", mask, authMac, c.restlsOutboundCounter, c.restlsInboundCounter)
+	copy(outBuf[5:], authMac)
+	return outBuf, nil
+}
+
+// #RESTLS#
+func (c *Conn) actAccordingToScript(data []byte) (int, int, int, restlsCommand) {
+	paddingLen := 0
+	dataLen := len(data)
+	var command restlsCommand = ActNoop{}
+	if c.restlsOutboundCounter < uint32(len(c.config.RestlsScript)) {
+		line := c.config.RestlsScript[c.restlsOutboundCounter]
+		dataLen = line.targetLen.Len()
+		command = line.command
+	}
+	if dataLen == 0 {
+		paddingLen = 19 + rand.Intn(100)
+	}
+	if len(data) < dataLen {
+		paddingLen = dataLen - len(data)
+		dataLen = len(data)
+	}
+	payloadLen := dataLen + restlsAppDataAuthHeaderLength + paddingLen
+	if payloadLen > maxPlaintext {
+		payloadLen = maxPlaintext
+	}
+	dataLen = payloadLen - restlsAppDataAuthHeaderLength - paddingLen
+	if dataLen < 0 {
+		panic("target length is too large")
+	}
+	return payloadLen, dataLen, paddingLen, command
+}
+
+// #RESTLS#
+func (c *Conn) writeRestlsApplicationRecord(dataNew []byte) (int, error) {
+	outBufPtr := outBufPool.Get().(*[]byte)
+	outBuf := *outBufPtr
+	defer func() {
+		// You might be tempted to simplify this by just passing &outBuf to Put,
+		// but that would make the local copy of the outBuf slice header escape
+		// to the heap, causing an allocation. Instead, we keep around the
+		// pointer to the slice header returned by Get, which is already on the
+		// heap, and overwrite and return that.
+		*outBufPtr = outBuf
+		outBufPool.Put(outBufPtr)
+	}()
+	fakeResponse := false
+	if bytes.Equal(dataNew, restlsRandomResponseMagic) {
+		// fmt.Printf("writeRestls writing random response\n")
+		fakeResponse = true
+		dataNew = []byte{}
+		c.restlsWritePending.Store(false)
+	}
+
+	if c.restlsWritePending.Load() {
+		c.restlsSendBuf = append(c.restlsSendBuf, dataNew...)
+		return len(dataNew), nil
+	}
+
+	var data []byte
+	if len(c.restlsSendBuf) > 0 {
+		// fmt.Println("writeRestlsApplicationRecord writing pending data")
+		c.restlsSendBuf = append(c.restlsSendBuf, dataNew...)
+		data = c.restlsSendBuf
+	} else {
+		data = dataNew
+	}
+
+	var n int
+	for len(data) > 0 || fakeResponse {
+		payloadLen, dataLen, paddingLen, command := c.actAccordingToScript(data)
+		// fmt.Printf("writeRestls payloadLen %d, dataLen %d, paddingLen %d, command %v, dataSize %d\n", payloadLen, dataLen, paddingLen, command, len(data))
+		if payloadLen == 0 {
+			return 0, nil
+		}
+		_, outBuf = sliceForAppend(outBuf[:0], recordHeaderLen+restlsAppDataAuthHeaderLength)
+		outBuf[0] = byte(recordTypeApplicationData)
+		vers := VersionTLS12
+		outBuf[1] = byte(vers >> 8)
+		outBuf[2] = byte(vers)
+		outBuf[3] = byte(payloadLen >> 8)
+		outBuf[4] = byte(payloadLen)
+
+		outBuf = append(outBuf, data[:dataLen]...)
+		var err error
+		if outBuf, err = c.write0x17AuthHeader(paddingLen, dataLen, command, outBuf); err != nil {
+			// fmt.Printf("write0x17AuthHeader failed %v", err)
+			return n, err
+		}
+		if command.needInterrupt() && !fakeResponse {
+			c.restlsWritePending.Store(true)
+		}
+		if _, err = c.write(outBuf); err != nil {
+			// fmt.Printf("writeRestls c.write failed %v", err)
+			return n, err
+		}
+		c.restlsOutboundCounter += 1
+		n += payloadLen
+		data = data[dataLen:]
+		if command.needInterrupt() && !fakeResponse {
+			// fmt.Printf("restls write [%d] blocked, remaining %d\n", c.restlsOutboundCounter, len(data))
+			break
+		}
+		fakeResponse = false
+	}
+
+	if len(data) > 0 {
+		if len(c.restlsSendBuf) < len(data) {
+			if len(c.restlsSendBuf) > 0 {
+				panic("unexpected situation")
+			}
+			c.restlsSendBuf = append(c.restlsSendBuf, data...)
+		} else {
+			copy(c.restlsSendBuf, data)
+		}
+	}
+	c.restlsSendBuf = c.restlsSendBuf[:len(data)]
+
+	return len(dataNew), nil
+}
+
 // Write writes data to the connection.
 //
 // As Write calls Handshake, in order to prevent indefinite blocking a deadline
@@ -1170,6 +1461,14 @@ func (c *Conn) Write(b []byte) (int, error) {
 			m, b = 1, b[1:]
 		}
 	}
+
+	// #Restls# Begin
+	// fmt.Printf("c.restlsAuthed %v\n", c.restlsAuthed)
+	if c.restlsAuthed {
+		n, err := c.writeRestlsApplicationRecord(b)
+		return n, c.out.setErrorLocked(err)
+	}
+	// #Restls# End
 
 	n, err := c.writeRecordLocked(recordTypeApplicationData, b)
 	return n + m, c.out.setErrorLocked(err)
