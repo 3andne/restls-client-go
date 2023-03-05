@@ -8,4 +8,4 @@ It is able to parrot four types of TLS clients:
 * `firefox`
 
 ## Credits
-`restls-client-go` is developed based on `refraction-networking/utls`.
+`restls-client-go` is developed based on [refraction-networking/utls](https://github.com/refraction-networking/utls).
