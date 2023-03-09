@@ -175,21 +175,31 @@ func (c *Conn) generateSessionIDForTLS12(hello *clientHelloMsg) error {
 	if c.config.VersionHint != TLS12Hint && hello.supportedVersions[0] != VersionTLS12 {
 		panic("session id should only be generated from pub key and session ticket for TLS 1.2")
 	}
-	hint := CurveID(c.config.CurveIDHint.Load())
-	params, err := generateECDHEParameters(c.config.rand(), hint)
-	if err != nil {
-		return fmt.Errorf("restls: CurvePreferences includes unsupported curve: %v", err)
+	paramsList := []*ecdheParameters{}
+	materials := make([][]byte, 0, 4)
+	for _, curve := range curveIDList {
+		params, err := generateECDHEParameters(c.config.rand(), curve)
+		if err != nil {
+			return fmt.Errorf("restls: CurvePreferences includes unsupported curve: %v", err)
+		}
+		paramsList = append(paramsList, &params)
+		materials = append(materials, params.PublicKey())
 	}
-	c.tls12PubKey = params.PublicKey()
-	c.eagerEcdheParameters = &params
-	hmac := RestlsHmac(c.config.RestlsSecret)
-	hmac.Write(c.tls12PubKey)
-	pubkeyhash := hmac.Sum(nil)[:restlsHandshakeMACLength]
-	copy(hello.sessionId[restls12PubKeyMACOffset:], pubkeyhash)
+	c.eagerEcdheParameters = paramsList
+
 	if len(hello.sessionTicket) > 0 {
+		materials = append(materials, hello.sessionTicket)
+	}
+
+	layout := restls12ClientAuthLayout3
+	if len(materials) == 4 {
+		layout = restls12ClientAuthLayout4
+	}
+
+	for i, material := range materials {
 		hmac := RestlsHmac(c.config.RestlsSecret)
-		hmac.Write(hello.sessionTicket)
-		copy(hello.sessionId[restls12SessionTicketMACOffset:], hmac.Sum(nil)[:restlsHandshakeMACLength])
+		hmac.Write(material)
+		copy(hello.sessionId[layout[i]:layout[i+1]], hmac.Sum(nil))
 	}
 	return nil
 }
@@ -458,7 +468,15 @@ func (hs *clientHandshakeState) handshake() error {
 
 	c.buffering = true
 	c.didResume = isResume
-	c.clientFinishedIsFirst = true // #Restls#
+	// #Restls# Begin
+	c.clientFinishedIsFirst = true
+	for _, ci := range tls12GCMCiphers {
+		if ci == hs.suite.id {
+			c.restls12WithGCM = true
+			break
+		}
+	}
+	// #Restls# End
 	if isResume {
 		if err := hs.establishKeys(); err != nil {
 			return err

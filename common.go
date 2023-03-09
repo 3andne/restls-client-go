@@ -755,11 +755,10 @@ type Config struct {
 	// auto-rotation logic. See Config.ticketKeys.
 	autoSessionTicketKeys []ticketKey
 
-	RestlsSecret []byte         // #RESTLS#
-	VersionHint  versionHint    // #RESTLS#
-	CurveIDHint  atomic.Uint32  // #RESTLS#
-	RestlsScript []Line         // #RESTLS#
-	ClientID     *ClientHelloID // #RESTLS#
+	RestlsSecret []byte                        // #RESTLS#
+	VersionHint  versionHint                   // #RESTLS#
+	RestlsScript []Line                        // #RESTLS#
+	ClientID     atomic.Pointer[ClientHelloID] // #RESTLS#
 }
 
 const (
@@ -842,7 +841,6 @@ func (c *Config) Clone() *Config {
 		KeyLogWriter:                c.KeyLogWriter,
 		sessionTicketKeys:           c.sessionTicketKeys,
 		autoSessionTicketKeys:       c.autoSessionTicketKeys,
-		CurveIDHint:                 c.CurveIDHint,  // #RESTLS#
 		VersionHint:                 c.VersionHint,  // #RESTLS#
 		RestlsSecret:                c.RestlsSecret, // #RESTLS#
 		RestlsScript:                c.RestlsScript, // #RESTLS#
@@ -1534,11 +1532,11 @@ const (
 	restlsMaskLength              int = restlsCmdLength + 2
 	restlsAppDataAuthHeaderLength int = restlsAppDataMACLength +
 		restlsMaskLength
-	restls12SessionTicketMACOffset int = 16
-	restls12PubKeyMACOffset        int = 0
-	restlsAppDataOffset            int = 5 + restlsAppDataAuthHeaderLength
-	restlsAppDataLenOffset         int = 5 + restlsAppDataMACLength
+	restlsAppDataOffset    int = restlsAppDataAuthHeaderLength
+	restlsAppDataLenOffset int = restlsAppDataMACLength
 )
 
 // #RESTLS#
 var restlsRandomResponseMagic []byte = []byte("restls-random-response")
+var restls12ClientAuthLayout3 []int = []int{0, 11, 22, 32}
+var restls12ClientAuthLayout4 []int = []int{0, 8, 16, 24, 32}

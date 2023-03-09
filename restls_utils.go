@@ -190,12 +190,12 @@ func getInteger(script *[]byte) int16 {
 	return int16(res)
 }
 
-var curveIDMap = map[string]CurveID{
-	"curvep256": CurveP256,
-	"curvep384": CurveP384,
-	"curvep521": CurveP521,
-	"x25519":    X25519,
+var curveIDMap = map[CurveID]int{
+	X25519:    0,
+	CurveP256: 1,
+	CurveP384: 2,
 }
+var curveIDList = []CurveID{X25519, CurveP256, CurveP384}
 
 var versionMap = map[string]versionHint{
 	"tls12": TLS12Hint,
@@ -209,29 +209,27 @@ var clientIDMap = map[string]*ClientHelloID{
 	"ios":     &HelloIOS_Auto,
 }
 
+var tls12GCMCiphers = []uint16{0xc02f, 0xc02b, 0xc030, 0xc02c}
+
 var defaultRestlsScript = "250?100<1,350~100<1,600~100,300~200,300~100"
 
-func NewRestlsConfig(serverName string, password string, versionHintString string, CurveIDHintString string, restlsScript string, clientID string) (*Config, error) {
+func NewRestlsConfig(serverName string, password string, versionHintString string, restlsScript string, clientIDStr string) (*Config, error) {
 	key := make([]byte, 32)
 	blake3.DeriveKey(key, "restls-traffic-key", []byte(password))
 	versionHint, ok := versionMap[strings.ToLower(versionHintString)]
 	if !ok {
 		return nil, fmt.Errorf("invalid version hint: should be either tls12 or tls13")
 	}
-	curveIDHint, ok := curveIDMap[strings.ToLower(CurveIDHintString)]
-	if !ok && versionHint != TLS13Hint {
-		return nil, fmt.Errorf("you must provide a curveIDHint for restls 1.2")
-	}
-	_hint := atomic.Uint32{}
-	_hint.Store(uint32(curveIDHint))
 	if len(restlsScript) == 0 {
 		restlsScript = defaultRestlsScript
 	}
-	clientIDPtr, ok := clientIDMap[clientID]
+	clientIDPtr, ok := clientIDMap[clientIDStr]
 	if !ok {
 		clientIDPtr = &HelloChrome_Auto
 	}
-	return &Config{RestlsSecret: key, CurveIDHint: _hint, VersionHint: versionHint, ServerName: serverName, RestlsScript: parseRecordScript(restlsScript), ClientSessionCache: NewLRUClientSessionCache(100), ClientID: clientIDPtr}, nil
+	clientID := atomic.Pointer[ClientHelloID]{}
+	clientID.Store(clientIDPtr)
+	return &Config{RestlsSecret: key, VersionHint: versionHint, ServerName: serverName, RestlsScript: parseRecordScript(restlsScript), ClientSessionCache: NewLRUClientSessionCache(100), ClientID: clientID}, nil
 }
 
 // #Restls# End
