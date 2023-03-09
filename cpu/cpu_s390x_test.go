@@ -6,7 +6,7 @@ package cpu_test
 
 import (
 	"errors"
-	. "github.com/refraction-networking/utls/cpu"
+	. "github.com/3andne/restls-client-go/cpu"
 	"os"
 	"regexp"
 	"testing"

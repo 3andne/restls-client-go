@@ -10,7 +10,7 @@ package cpu_test
 import (
 	"testing"
 
-	. "github.com/refraction-networking/utls/cpu"
+	. "github.com/3andne/restls-client-go/cpu"
 )
 
 func TestX86ifAVX2hasAVX(t *testing.T) {
