@@ -427,7 +427,7 @@ func (c *UConn) clientHandshake(ctx context.Context) (err error) {
 		return err
 	}
 	if cacheKey != "" && session != nil {
-		debugf("found session")
+		debugf("found session") // #Restls#
 		defer func() {
 			// If we got a handshake failure when resuming a session, throw away
 			// the session ticket. See RFC 5077, Section 3.2.
