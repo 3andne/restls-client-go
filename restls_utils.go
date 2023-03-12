@@ -56,7 +56,7 @@ func (r *RestlsPlugin) expectServerAuth(rType recordType) any {
 
 func (r *RestlsPlugin) captureClientFinished(record []byte) {
 	if r.isClient && !r.isInbound && r.writingClientFinished {
-		// fmt.Printf("ClientFinished captured %v", record)
+		debugf("ClientFinished captured %v", record)
 		r.writingClientFinished = false
 		r.clientFinished = append([]byte(nil), record...)
 	}
@@ -168,7 +168,7 @@ func parseRecordScript(script string) []Line {
 			panic(fmt.Sprintf("invalid script %s, %v", line_raw, line_bytes))
 		}
 	}
-	// fmt.Printf("script: %v", lines)
+	debugf("script: %v", lines)
 	return lines
 }
 
@@ -212,6 +212,14 @@ var clientIDMap = map[string]*ClientHelloID{
 var tls12GCMCiphers = []uint16{0xc02f, 0xc02b, 0xc030, 0xc02c}
 
 var defaultRestlsScript = "250?100<1,350~100<1,600~100,300~200,300~100"
+
+const debugLog = false
+
+func debugf(format string, a ...any) {
+	if debugLog {
+		fmt.Printf(format, a...)
+	}
+}
 
 func NewRestlsConfig(serverName string, password string, versionHintString string, restlsScript string, clientIDStr string) (*Config, error) {
 	key := make([]byte, 32)

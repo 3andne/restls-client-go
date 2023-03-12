@@ -410,7 +410,7 @@ func (c *UConn) clientHandshake(ctx context.Context) (err error) {
 	// [uTLS section ends]
 
 	// #Restls# Begin
-	// fmt.Printf("hello.keyShares(private) %v\n", hello.keyShares)
+	debugf("hello.keyShares(private) %v\n", hello.keyShares)
 	supportTLS13 := false
 	for _, v := range hello.supportedVersions {
 		if v == VersionTLS13 {
@@ -425,6 +425,7 @@ func (c *UConn) clientHandshake(ctx context.Context) (err error) {
 
 	cacheKey, session, earlySecret, binderKey := c.loadSession(hello)
 	if cacheKey != "" && session != nil {
+		debugf("found session")
 		defer func() {
 			// If we got a handshake failure when resuming a session, throw away
 			// the session ticket. See RFC 5077, Section 3.2.
@@ -444,7 +445,7 @@ func (c *UConn) clientHandshake(ctx context.Context) (err error) {
 			return err
 		}
 	}
-	// fmt.Printf("%v, %v, %v\n", c.HandshakeState.Hello.SessionId, hello.sessionId, hello.raw[39:39+32])
+	debugf("%v, %v, %v\n", c.HandshakeState.Hello.SessionId, hello.sessionId, hello.raw[39:39+32])
 	copy(hello.raw[39:], hello.sessionId) // patch session id
 	// #Restls# End
 

@@ -167,7 +167,7 @@ func (c *Conn) generateSessionIDForTLS13(hello *clientHelloMsg) {
 		hmac.Write(psk.label)
 	}
 	copy(hello.sessionId[:], hmac.Sum(nil)[:restlsHandshakeMACLength])
-	// fmt.Printf("generated session id: %v\n", hello.sessionId)
+	debugf("generated session id: %v\n", hello.sessionId)
 }
 
 // #Restls#

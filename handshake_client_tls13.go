@@ -741,6 +741,8 @@ func (c *Conn) handleNewSessionTicket(msg *newSessionTicketMsgTLS13) error {
 		return errors.New("tls: received new session ticket from a client")
 	}
 
+	debugf("c.config.SessionTicketsDisabled %v || c.config.ClientSessionCache == nil %v\n", c.config.SessionTicketsDisabled, c.config.ClientSessionCache == nil)
+
 	if c.config.SessionTicketsDisabled || c.config.ClientSessionCache == nil {
 		return nil
 	}
