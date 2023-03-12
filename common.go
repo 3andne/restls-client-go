@@ -43,7 +43,7 @@ const (
 	maxCiphertextTLS13 = 16384 + 256  // maximum ciphertext length in TLS 1.3
 	recordHeaderLen    = 5            // record header length
 	maxHandshake       = 65536        // maximum handshake we support (protocol max is 16 MB)
-	maxUselessRecords  = 16           // maximum number of consecutive non-advancing records
+	maxUselessRecords  = 32           // maximum number of consecutive non-advancing records
 )
 
 // TLS record types.
@@ -102,7 +102,6 @@ const (
 	extensionCertificateAuthorities  uint16 = 47
 	extensionSignatureAlgorithmsCert uint16 = 50
 	extensionKeyShare                uint16 = 51
-	extensionNextProtoNeg            uint16 = 13172 // not IANA assigned // Pending discussion on whether or not remove this. crypto/tls removed it on Nov 21, 2019.
 	extensionRenegotiationInfo       uint16 = 0xff01
 )
 
@@ -152,7 +151,8 @@ const (
 
 // TLS CertificateStatusType (RFC 3546)
 const (
-	statusTypeOCSP uint8 = 1
+	statusTypeOCSP   uint8 = 1
+	statusV2TypeOCSP uint8 = 2
 )
 
 // Certificate types (for certificateRequestMsg)
@@ -657,6 +657,13 @@ type Config struct {
 	// testing or in combination with VerifyConnection or VerifyPeerCertificate.
 	InsecureSkipVerify bool
 
+	// InsecureSkipTimeVerify controls whether a client verifies the server's
+	// certificate chain against time. If InsecureSkipTimeVerify is true, 
+	// crypto/tls accepts the certificate even when it is expired. 
+	//
+	// This field is ignored when InsecureSkipVerify is true.
+	InsecureSkipTimeVerify bool // [uTLS]
+
 	// InsecureServerNameToVerify is used to verify the hostname on the returned
 	// certificates. It is intended to use with spoofed ServerName.
 	// If InsecureServerNameToVerify is "*", crypto/tls will do normal
@@ -827,6 +834,7 @@ func (c *Config) Clone() *Config {
 		ClientAuth:                  c.ClientAuth,
 		ClientCAs:                   c.ClientCAs,
 		InsecureSkipVerify:          c.InsecureSkipVerify,
+		InsecureSkipTimeVerify:      c.InsecureSkipTimeVerify,
 		InsecureServerNameToVerify:  c.InsecureServerNameToVerify,
 		CipherSuites:                c.CipherSuites,
 		PreferServerCipherSuites:    c.PreferServerCipherSuites,
@@ -1415,7 +1423,7 @@ func (c *Certificate) leaf() (*x509.Certificate, error) {
 }
 
 type handshakeMessage interface {
-	marshal() []byte
+	marshal() ([]byte, error)
 	unmarshal([]byte) bool
 }
 

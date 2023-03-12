@@ -422,8 +422,10 @@ func (c *UConn) clientHandshake(ctx context.Context) (err error) {
 		c.generateSessionIDForTLS13(hello)
 	}
 	// #Restls# End
-
-	cacheKey, session, earlySecret, binderKey := c.loadSession(hello)
+	cacheKey, session, earlySecret, binderKey, err := c.loadSession(hello)
+	if err != nil {
+		return err
+	}
 	if cacheKey != "" && session != nil {
 		debugf("found session")
 		defer func() {
@@ -456,11 +458,11 @@ func (c *UConn) clientHandshake(ctx context.Context) (err error) {
 		}
 	}
 
-	if _, err := c.writeRecord(recordTypeHandshake, hello.marshal()); err != nil {
+	if _, err := c.writeHandshakeRecord(hello, nil); err != nil {
 		return err
 	}
 
-	msg, err := c.readHandshake()
+	msg, err := c.readHandshake(nil)
 	if err != nil {
 		return err
 	}
@@ -633,7 +635,7 @@ func (uconn *UConn) SetTLSVers(minTLSVers, maxTLSVers uint16, specExtensions []T
 					minVers := uint16(0)
 					maxVers := uint16(0)
 					for _, vers := range versions {
-						if vers == GREASE_PLACEHOLDER {
+						if isGREASEUint16(vers) {
 							continue
 						}
 						if maxVers < vers || maxVers == 0 {
