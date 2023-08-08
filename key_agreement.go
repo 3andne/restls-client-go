@@ -6,6 +6,7 @@ package tls
 
 import (
 	"crypto"
+	"crypto/ecdh"
 	"crypto/md5"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -30,7 +31,7 @@ type keyAgreement interface {
 
 	// This method may not be called if the server doesn't send a
 	// ServerKeyExchange message.
-	processServerKeyExchange(*Config, *clientHelloMsg, *serverHelloMsg, *x509.Certificate, *serverKeyExchangeMsg, []*ecdheParameters /* #Restls# */) error
+	processServerKeyExchange(*Config, *clientHelloMsg, *serverHelloMsg, *x509.Certificate, *serverKeyExchangeMsg, []*ecdh.PrivateKey /* #Restls# */) error
 	generateClientKeyExchange(*Config, *clientHelloMsg, *x509.Certificate) ([]byte, *clientKeyExchangeMsg, error)
 }
 
@@ -73,7 +74,7 @@ func (ka rsaKeyAgreement) processClientKeyExchange(config *Config, cert *Certifi
 	return preMasterSecret, nil
 }
 
-func (ka rsaKeyAgreement) processServerKeyExchange(config *Config, clientHello *clientHelloMsg, serverHello *serverHelloMsg, cert *x509.Certificate, skx *serverKeyExchangeMsg, eagerParam []*ecdheParameters /* #Restls# */) error {
+func (ka rsaKeyAgreement) processServerKeyExchange(config *Config, clientHello *clientHelloMsg, serverHello *serverHelloMsg, cert *x509.Certificate, skx *serverKeyExchangeMsg, eagerKey []*ecdh.PrivateKey /* #Restls# */) error {
 	return errors.New("tls: unexpected ServerKeyExchange")
 }
 
@@ -157,7 +158,7 @@ func hashForServerKeyExchange(sigType uint8, hashFunc crypto.Hash, version uint1
 type ecdheKeyAgreement struct {
 	version uint16
 	isRSA   bool
-	params  ecdheParameters
+	key     *ecdh.PrivateKey
 
 	// ckx and preMasterSecret are generated in processServerKeyExchange
 	// and returned in generateClientKeyExchange.
@@ -177,18 +178,18 @@ func (ka *ecdheKeyAgreement) generateServerKeyExchange(config *Config, cert *Cer
 	if curveID == 0 {
 		return nil, errors.New("tls: no supported elliptic curves offered")
 	}
-	if _, ok := curveForCurveID(curveID); curveID != X25519 && !ok {
+	if _, ok := curveForCurveID(curveID); !ok {
 		return nil, errors.New("tls: CurvePreferences includes unsupported curve")
 	}
 
-	params, err := generateECDHEParameters(config.rand(), curveID)
+	key, err := generateECDHEKey(config.rand(), curveID)
 	if err != nil {
 		return nil, err
 	}
-	ka.params = params
+	ka.key = key
 
 	// See RFC 4492, Section 5.4.
-	ecdhePublic := params.PublicKey()
+	ecdhePublic := key.PublicKey().Bytes()
 	serverECDHEParams := make([]byte, 1+2+1+len(ecdhePublic))
 	serverECDHEParams[0] = 3 // named curve
 	serverECDHEParams[1] = byte(curveID >> 8)
@@ -259,15 +260,19 @@ func (ka *ecdheKeyAgreement) processClientKeyExchange(config *Config, cert *Cert
 		return nil, errClientKeyExchange
 	}
 
-	preMasterSecret := ka.params.SharedKey(ckx.ciphertext[1:])
-	if preMasterSecret == nil {
+	peerKey, err := ka.key.Curve().NewPublicKey(ckx.ciphertext[1:])
+	if err != nil {
+		return nil, errClientKeyExchange
+	}
+	preMasterSecret, err := ka.key.ECDH(peerKey)
+	if err != nil {
 		return nil, errClientKeyExchange
 	}
 
 	return preMasterSecret, nil
 }
 
-func (ka *ecdheKeyAgreement) processServerKeyExchange(config *Config, clientHello *clientHelloMsg, serverHello *serverHelloMsg, cert *x509.Certificate, skx *serverKeyExchangeMsg, paramsPtr []*ecdheParameters /* #Restls# */) (err /* #Restls# */ error) {
+func (ka *ecdheKeyAgreement) processServerKeyExchange(config *Config, clientHello *clientHelloMsg, serverHello *serverHelloMsg, cert *x509.Certificate, skx *serverKeyExchangeMsg, keyPtr []*ecdh.PrivateKey /* #Restls# */) (err /* #Restls# */ error) {
 	if len(skx.key) < 4 {
 		return errServerKeyExchange
 	}
@@ -288,31 +293,40 @@ func (ka *ecdheKeyAgreement) processServerKeyExchange(config *Config, clientHell
 		return errServerKeyExchange
 	}
 
-	if _, ok := curveForCurveID(curveID); curveID != X25519 && !ok {
+	if _, ok := curveForCurveID(curveID); !ok {
 		return errors.New("tls: server selected unsupported curve")
 	}
 
 	// #Restls# Begin
-	if curveID == CurveP521 || len(paramsPtr) == 0 {
+	var key *ecdh.PrivateKey
+	if curveID == CurveP521 || len(keyPtr) == 0 {
 		if curveID == CurveP521 {
 			config.ClientID.Store(&HelloChrome_Auto)
 		}
-		params, err := generateECDHEParameters(config.rand(), curveID)
+		// params, err := generateECDHEParameters(config.rand(), curveID)
+		key_, err := generateECDHEKey(config.rand(), curveID)
 		if err != nil {
 			return err
 		}
-		ka.params = params
+		key = key_
 	} else {
-		ka.params = *paramsPtr[curveIDMap[curveID]]
+		// ka.params = *paramsPtr[curveIDMap[curveID]]
+		key = keyPtr[curveIDMap[curveID]]
 	}
 	// #Restls# End
 
-	ka.preMasterSecret = ka.params.SharedKey(publicKey) // #Restls#
-	if ka.preMasterSecret == nil {
+	ka.key = key
+
+	peerKey, err := key.Curve().NewPublicKey(publicKey)
+	if err != nil {
+		return errServerKeyExchange
+	}
+	ka.preMasterSecret, err = key.ECDH(peerKey)
+	if err != nil {
 		return errServerKeyExchange
 	}
 
-	ourPublicKey := ka.params.PublicKey() // #Restls#
+	ourPublicKey := key.PublicKey().Bytes()
 	ka.ckx = new(clientKeyExchangeMsg)
 	ka.ckx.ciphertext = make([]byte, 1+len(ourPublicKey))
 	ka.ckx.ciphertext[0] = byte(len(ourPublicKey))

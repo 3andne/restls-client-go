@@ -34,11 +34,10 @@ const (
 const (
 	extensionNextProtoNeg uint16 = 13172 // not IANA assigned. Removed by crypto/tls since Nov 2019
 
-	utlsExtensionPadding              uint16 = 21
-	utlsExtensionExtendedMasterSecret uint16 = 23    // https://tools.ietf.org/html/rfc7627
-	utlsExtensionCompressCertificate  uint16 = 27    // https://datatracker.ietf.org/doc/html/rfc8879#section-7.1
-	utlsExtensionApplicationSettings  uint16 = 17513 // not IANA assigned
-	utlsFakeExtensionCustom           uint16 = 1234  // not IANA assigned, for ALPS
+	utlsExtensionPadding             uint16 = 21
+	utlsExtensionCompressCertificate uint16 = 27    // https://datatracker.ietf.org/doc/html/rfc8879#section-7.1
+	utlsExtensionApplicationSettings uint16 = 17513 // not IANA assigned
+	utlsFakeExtensionCustom          uint16 = 1234  // not IANA assigned, for ALPS
 
 	// extensions with 'fake' prefix break connection, if server echoes them back
 	fakeExtensionEncryptThenMAC       uint16 = 22
@@ -71,6 +70,19 @@ const (
 
 	// https://docs.microsoft.com/en-us/dotnet/api/system.net.security.tlsciphersuite?view=netcore-3.1
 	FAKE_TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA = uint16(0xc008)
+)
+
+const (
+	CurveSECP256R1 CurveID = 0x0017
+	CurveSECP384R1 CurveID = 0x0018
+	CurveSECP521R1 CurveID = 0x0019
+	CurveX25519    CurveID = 0x001d
+
+	FakeCurveFFDHE2048 CurveID = 0x0100
+	FakeCurveFFDHE3072 CurveID = 0x0101
+	FakeCurveFFDHE4096 CurveID = 0x0102
+	FakeCurveFFDHE6144 CurveID = 0x0103
+	FakeCurveFFDHE8192 CurveID = 0x0104
 )
 
 // Other things
@@ -210,8 +222,9 @@ func (chs *ClientHelloSpec) ReadTLSExtensions(b []byte, allowBluntMimicry bool) 
 			return fmt.Errorf("unable to read data for extension %x", extension)
 		}
 
-		extWriter := ExtensionIDToExtension(extension)
-		if extWriter != nil {
+		ext := ExtensionFromID(extension)
+		extWriter, ok := ext.(TLSExtensionWriter)
+		if ext != nil && ok { // known extension and implements TLSExtensionWriter properly
 			if extension == extensionSupportedVersions {
 				chs.TLSVersMin = 0
 				chs.TLSVersMax = 0
@@ -293,8 +306,12 @@ func (chs *ClientHelloSpec) ImportTLSClientHello(data map[string][]byte) error {
 	}
 
 	for _, extType := range tlsExtensionTypes {
-		extension := ExtensionIDToExtension(extType)
-		if extension == nil {
+		extension := ExtensionFromID(extType)
+		extWriter, ok := extension.(TLSExtensionWriter)
+		if !ok {
+			return fmt.Errorf("unsupported extension %d", extType)
+		}
+		if extension == nil || !ok {
 			log.Printf("[Warning] Unsupported extension %d added as a &GenericExtension without Data", extType)
 			chs.Extensions = append(chs.Extensions, &GenericExtension{extType, []byte{}})
 		} else {
@@ -303,7 +320,7 @@ func (chs *ClientHelloSpec) ImportTLSClientHello(data map[string][]byte) error {
 				if data["pt_fmts"] == nil {
 					return errors.New("pt_fmts is required")
 				}
-				_, err = extension.Write(data["pt_fmts"])
+				_, err = extWriter.Write(data["pt_fmts"])
 				if err != nil {
 					return err
 				}
@@ -311,7 +328,7 @@ func (chs *ClientHelloSpec) ImportTLSClientHello(data map[string][]byte) error {
 				if data["sig_algs"] == nil {
 					return errors.New("sig_algs is required")
 				}
-				_, err = extension.Write(data["sig_algs"])
+				_, err = extWriter.Write(data["sig_algs"])
 				if err != nil {
 					return err
 				}
@@ -327,7 +344,7 @@ func (chs *ClientHelloSpec) ImportTLSClientHello(data map[string][]byte) error {
 				fixedData := make([]byte, len(data["supported_versions"])+1)
 				fixedData[0] = uint8(len(data["supported_versions"]) & 0xff)
 				copy(fixedData[1:], data["supported_versions"])
-				_, err = extension.Write(fixedData)
+				_, err = extWriter.Write(fixedData)
 				if err != nil {
 					return err
 				}
@@ -336,7 +353,7 @@ func (chs *ClientHelloSpec) ImportTLSClientHello(data map[string][]byte) error {
 					return errors.New("curves is required")
 				}
 
-				_, err = extension.Write(data["curves"])
+				_, err = extWriter.Write(data["curves"])
 				if err != nil {
 					return err
 				}
@@ -345,7 +362,7 @@ func (chs *ClientHelloSpec) ImportTLSClientHello(data map[string][]byte) error {
 					return errors.New("alpn is required")
 				}
 
-				_, err = extension.Write(data["alpn"])
+				_, err = extWriter.Write(data["alpn"])
 				if err != nil {
 					return err
 				}
@@ -365,7 +382,7 @@ func (chs *ClientHelloSpec) ImportTLSClientHello(data map[string][]byte) error {
 				// add uint16 length prefix
 				fixedData = append([]byte{uint8(len(fixedData) >> 8), uint8(len(fixedData) & 0xff)}, fixedData...)
 
-				_, err = extension.Write(fixedData)
+				_, err = extWriter.Write(fixedData)
 				if err != nil {
 					return err
 				}
@@ -378,7 +395,7 @@ func (chs *ClientHelloSpec) ImportTLSClientHello(data map[string][]byte) error {
 				fixedData := make([]byte, len(data["psk_key_exchange_modes"])+1)
 				fixedData[0] = uint8(len(data["psk_key_exchange_modes"]) & 0xff)
 				copy(fixedData[1:], data["psk_key_exchange_modes"])
-				_, err = extension.Write(fixedData)
+				_, err = extWriter.Write(fixedData)
 				if err != nil {
 					return err
 				}
@@ -391,7 +408,7 @@ func (chs *ClientHelloSpec) ImportTLSClientHello(data map[string][]byte) error {
 				fixedData := make([]byte, len(data["cert_compression_algs"])+1)
 				fixedData[0] = uint8(len(data["cert_compression_algs"]) & 0xff)
 				copy(fixedData[1:], data["cert_compression_algs"])
-				_, err = extension.Write(fixedData)
+				_, err = extWriter.Write(fixedData)
 				if err != nil {
 					return err
 				}
@@ -400,14 +417,14 @@ func (chs *ClientHelloSpec) ImportTLSClientHello(data map[string][]byte) error {
 					return errors.New("record_size_limit is required")
 				}
 
-				_, err = extension.Write(data["record_size_limit"]) // uint16 as []byte
+				_, err = extWriter.Write(data["record_size_limit"]) // uint16 as []byte
 				if err != nil {
 					return err
 				}
 			case utlsExtensionApplicationSettings:
 				// TODO: tlsfingerprint.io should record/provide application settings data
-				extension.(*ApplicationSettingsExtension).SupportedProtocols = []string{"h2"}
-			case fakeExtensionPreSharedKey:
+				extWriter.(*ApplicationSettingsExtension).SupportedProtocols = []string{"h2"}
+			case extensionPreSharedKey:
 				log.Printf("[Warning] PSK extension added without data")
 			default:
 				if !isGREASEUint16(extType) {
@@ -416,12 +433,15 @@ func (chs *ClientHelloSpec) ImportTLSClientHello(data map[string][]byte) error {
 					log.Printf("[Warning] GREASE extension added but ID/Data discarded. They will be automatically re-GREASEd on ApplyPreset() call.")
 				}*/
 			}
-			chs.Extensions = append(chs.Extensions, extension)
+			chs.Extensions = append(chs.Extensions, extWriter)
 		}
 	}
 	return nil
 }
 
+// ImportTLSClientHelloFromJSON imports ClientHelloSpec from JSON data from client.tlsfingerprint.io format
+//
+// It calls ImportTLSClientHello internally after unmarshaling JSON data into map[string][]byte
 func (chs *ClientHelloSpec) ImportTLSClientHelloFromJSON(jsonB []byte) error {
 	var data map[string][]byte
 	err := json.Unmarshal(jsonB, &data)
@@ -429,6 +449,99 @@ func (chs *ClientHelloSpec) ImportTLSClientHelloFromJSON(jsonB []byte) error {
 		return err
 	}
 	return chs.ImportTLSClientHello(data)
+}
+
+// FromRaw converts a ClientHello message in the form of raw bytes into a ClientHelloSpec.
+func (chs *ClientHelloSpec) FromRaw(raw []byte, allowBluntMimicry ...bool) error {
+	if chs == nil {
+		return errors.New("cannot unmarshal into nil ClientHelloSpec")
+	}
+
+	var bluntMimicry = false
+	if len(allowBluntMimicry) == 1 {
+		bluntMimicry = allowBluntMimicry[0]
+	}
+
+	*chs = ClientHelloSpec{} // reset
+	s := cryptobyte.String(raw)
+
+	var contentType uint8
+	var recordVersion uint16
+	if !s.ReadUint8(&contentType) || // record type
+		!s.ReadUint16(&recordVersion) || !s.Skip(2) { // record version and length
+		return errors.New("unable to read record type, version, and length")
+	}
+
+	if recordType(contentType) != recordTypeHandshake {
+		return errors.New("record is not a handshake")
+	}
+
+	var handshakeVersion uint16
+	var handshakeType uint8
+
+	if !s.ReadUint8(&handshakeType) || !s.Skip(3) || // message type and 3 byte length
+		!s.ReadUint16(&handshakeVersion) || !s.Skip(32) { // 32 byte random
+		return errors.New("unable to read handshake message type, length, and random")
+	}
+
+	if handshakeType != typeClientHello {
+		return errors.New("handshake message is not a ClientHello")
+	}
+
+	chs.TLSVersMin = recordVersion
+	chs.TLSVersMax = handshakeVersion
+
+	var ignoredSessionID cryptobyte.String
+	if !s.ReadUint8LengthPrefixed(&ignoredSessionID) {
+		return errors.New("unable to read session id")
+	}
+
+	// CipherSuites
+	var cipherSuitesBytes cryptobyte.String
+	if !s.ReadUint16LengthPrefixed(&cipherSuitesBytes) {
+		return errors.New("unable to read ciphersuites")
+	}
+
+	if err := chs.ReadCipherSuites(cipherSuitesBytes); err != nil {
+		return err
+	}
+
+	// CompressionMethods
+	var compressionMethods cryptobyte.String
+	if !s.ReadUint8LengthPrefixed(&compressionMethods) {
+		return errors.New("unable to read compression methods")
+	}
+
+	if err := chs.ReadCompressionMethods(compressionMethods); err != nil {
+		return err
+	}
+
+	if s.Empty() {
+		// Extensions are optional
+		return nil
+	}
+
+	var extensions cryptobyte.String
+	if !s.ReadUint16LengthPrefixed(&extensions) {
+		return errors.New("unable to read extensions data")
+	}
+
+	if err := chs.ReadTLSExtensions(extensions, bluntMimicry); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// UnmarshalJSON unmarshals a ClientHello message in the form of JSON into a ClientHelloSpec.
+func (chs *ClientHelloSpec) UnmarshalJSON(jsonB []byte) error {
+	var chsju ClientHelloSpecJSONUnmarshaler
+	if err := json.Unmarshal(jsonB, &chsju); err != nil {
+		return err
+	}
+
+	*chs = chsju.ClientHelloSpec()
+	return nil
 }
 
 var (
@@ -468,6 +581,10 @@ var (
 	HelloChrome_100         = ClientHelloID{helloChrome, "100", nil, nil}
 	HelloChrome_102         = ClientHelloID{helloChrome, "102", nil, nil}
 	HelloChrome_106_Shuffle = ClientHelloID{helloChrome, "106", nil, nil} // beta: shuffler enabled starting from 106
+
+	// Chrome with PSK: Chrome start sending this ClientHello after doing TLS 1.3 handshake with the same server.
+	HelloChrome_100_PSK      = ClientHelloID{helloChrome, "100_PSK", nil, nil} // beta: PSK extension added. uTLS doesn't fully support PSK. Use at your own risk.
+	HelloChrome_112_PSK_Shuf = ClientHelloID{helloChrome, "112_PSK", nil, nil} // beta: PSK extension added. uTLS doesn't fully support PSK. Use at your own risk.
 
 	HelloIOS_Auto = HelloIOS_14
 	HelloIOS_11_1 = ClientHelloID{helloIOS, "111", nil, nil} // legacy "111" means 11.1
