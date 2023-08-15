@@ -17,4 +17,9 @@ require (
 	golang.org/x/sys v0.11.0
 )
 
-require golang.org/x/text v0.12.0 // indirect
+require (
+	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
+	golang.org/x/text v0.12.0 // indirect
+)
+
+require lukechampine.com/blake3 v1.1.7
