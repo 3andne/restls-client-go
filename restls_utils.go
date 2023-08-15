@@ -225,7 +225,7 @@ var tls12GCMCiphers = []uint16{0xc02f, 0xc02b, 0xc030, 0xc02c}
 
 var defaultRestlsScript = "250?100<1,350~100<1,600~100,300~200,300~100"
 
-const debugLog = true
+const debugLog = false
 
 func debugf(conn *Conn, format string, a ...any) {
 	if debugLog {
