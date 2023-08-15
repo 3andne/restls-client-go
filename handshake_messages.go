@@ -102,7 +102,9 @@ type clientHelloMsg struct {
 }
 
 func (m *clientHelloMsg) marshal() ([]byte, error) {
+	debugf(nil, "marshal\n") // #Restls#
 	if m.raw != nil {
+		debugf(nil, "marshal: m.raw != nil return\n") // #Restls#
 		return m.raw, nil
 	}
 
@@ -266,12 +268,14 @@ func (m *clientHelloMsg) marshal() ([]byte, error) {
 	}
 	if len(m.pskIdentities) > 0 { // pre_shared_key must be the last extension
 		// RFC 8446, Section 4.2.11
+		debugf(nil, "adding psk ext\n") // #Restls#
 		exts.AddUint16(extensionPreSharedKey)
 		exts.AddUint16LengthPrefixed(func(exts *cryptobyte.Builder) {
 			exts.AddUint16LengthPrefixed(func(exts *cryptobyte.Builder) {
 				for _, psk := range m.pskIdentities {
 					exts.AddUint16LengthPrefixed(func(exts *cryptobyte.Builder) {
 						exts.AddBytes(psk.label)
+						debugf(nil, "adding psk label %v\n", psk.label) // #Restls#
 					})
 					exts.AddUint32(psk.obfuscatedTicketAge)
 				}
@@ -280,6 +284,7 @@ func (m *clientHelloMsg) marshal() ([]byte, error) {
 				for _, binder := range m.pskBinders {
 					exts.AddUint8LengthPrefixed(func(exts *cryptobyte.Builder) {
 						exts.AddBytes(binder)
+						debugf(nil, "adding psk binder %v\n", binder)
 					})
 				}
 			})
@@ -358,6 +363,7 @@ func (m *clientHelloMsg) updateBinders(pskBinders [][]byte) error {
 		b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
 			for _, binder := range m.pskBinders {
 				b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) {
+					debugf(nil, "updating binder %v\n", binder) // #Restls#
 					b.AddBytes(binder)
 				})
 			}

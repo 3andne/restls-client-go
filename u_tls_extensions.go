@@ -324,7 +324,7 @@ func (e *SupportedCurvesExtension) Write(b []byte) (int, error) {
 }
 
 func (e *SupportedCurvesExtension) writeToUConn(uc *UConn) error {
-	uc.config.CurvePreferences = e.Curves
+	// uc.config.CurvePreferences = e.Curves // #Restls# Remove
 	uc.HandshakeState.Hello.SupportedCurves = e.Curves
 	return nil
 }

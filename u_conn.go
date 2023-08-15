@@ -51,8 +51,7 @@ func UClient(conn net.Conn, config *Config, clientHelloID ClientHelloID) *UConn 
 	uconn := UConn{Conn: &tlsConn, ClientHelloID: clientHelloID, HandshakeState: handshakeState}
 	uconn.HandshakeState.uconn = &uconn
 	uconn.handshakeFn = uconn.clientHandshake
-	uconn.in.restlsPlugin.initAsClientInbound()   // #Restls#
-	uconn.out.restlsPlugin.initAsClientOutbound() // #Restls#
+	initRestlsPlugin(&uconn.in.restlsPlugin, &uconn.out.restlsPlugin) // #Restls#
 	return &uconn
 }
 
@@ -439,15 +438,12 @@ func (c *UConn) clientHandshake(ctx context.Context) (err error) {
 	// [uTLS section ends]
 
 	// #Restls# Begin
-	debugf("hello.keyShares(private) %v\n", hello.keyShares)
-	supportTLS13 := false
-	for _, v := range hello.supportedVersions {
-		if v == VersionTLS13 {
-			supportTLS13 = true
-			break
-		}
-	}
+	debugf(c.Conn, "hello.keyShares(private) %v\n", hello.keyShares)
+	supportTLS13 := AnyTrue(hello.supportedVersions, func(v uint16) bool {
+		return v == VersionTLS13
+	})
 	if c.config.VersionHint == TLS13Hint && supportTLS13 {
+		debugf(c.Conn, "u_conn generateSessionIDForTLS13\n")
 		c.generateSessionIDForTLS13(hello)
 	}
 	// #Restls# End
@@ -457,6 +453,7 @@ func (c *UConn) clientHandshake(ctx context.Context) (err error) {
 		return err
 	}
 	if session != nil {
+		debugf(c.Conn, "session loaded\n")
 		defer func() {
 			// If we got a handshake failure when resuming a session, throw away
 			// the session ticket. See RFC 5077, Section 3.2.
@@ -474,11 +471,12 @@ func (c *UConn) clientHandshake(ctx context.Context) (err error) {
 
 	// #Restls# Begin
 	if c.config.VersionHint == TLS12Hint || c.config.VersionHint == TLS13Hint && !supportTLS13 {
+		debugf(c.Conn, "c.generateSessionIDForTLS12\n")
 		if err := c.generateSessionIDForTLS12(hello); err != nil {
 			return err
 		}
 	}
-	debugf("%v, %v, %v\n", c.HandshakeState.Hello.SessionId, hello.sessionId, hello.raw[39:39+32])
+	debugf(c.Conn, "%v, %v, %v\n", c.HandshakeState.Hello.SessionId, hello.sessionId, hello.raw[39:39+32])
 	copy(hello.raw[39:], hello.sessionId) // patch session id
 	// #Restls# End
 

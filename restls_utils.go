@@ -19,16 +19,27 @@ type RestlsPlugin struct {
 	backupCipher          any
 	writingClientFinished bool
 	clientFinished        []byte
+	ConnId                int64
 }
 
-func (r *RestlsPlugin) initAsClientInbound() {
+func (r *RestlsPlugin) initAsClientInbound(id int64) {
 	r.isClient = true
 	r.isInbound = true
+	r.ConnId = id
 }
 
-func (r *RestlsPlugin) initAsClientOutbound() {
+func (r *RestlsPlugin) initAsClientOutbound(id int64) {
 	r.isClient = true
 	r.isInbound = false
+	r.ConnId = id
+}
+
+var IDCounter = atomic.Int64{}
+
+func initRestlsPlugin(inPlugin *RestlsPlugin, outPlugin *RestlsPlugin) {
+	id := IDCounter.Add(1)
+	inPlugin.initAsClientInbound(id)
+	outPlugin.initAsClientOutbound(id)
 }
 
 func (r *RestlsPlugin) setBackupCipher(backupCipher ...any) {
@@ -41,6 +52,7 @@ func (r *RestlsPlugin) setBackupCipher(backupCipher ...any) {
 }
 
 func (r *RestlsPlugin) changeCipher() {
+	debugf(nil, "[%d]RestlsPlugin changeCipher\n", r.ConnId)
 	r.numCipherChange += 1
 }
 
@@ -56,7 +68,7 @@ func (r *RestlsPlugin) expectServerAuth(rType recordType) any {
 
 func (r *RestlsPlugin) captureClientFinished(record []byte) {
 	if r.isClient && !r.isInbound && r.writingClientFinished {
-		debugf("ClientFinished captured %v", record)
+		debugf(nil, "[%d]ClientFinished captured %v", r.ConnId, record)
 		r.writingClientFinished = false
 		r.clientFinished = append([]byte(nil), record...)
 	}
@@ -168,7 +180,7 @@ func parseRecordScript(script string) []Line {
 			panic(fmt.Sprintf("invalid script %s, %v", line_raw, line_bytes))
 		}
 	}
-	debugf("script: %v", lines)
+	debugf(nil, "script: %v\n", lines)
 	return lines
 }
 
@@ -213,11 +225,15 @@ var tls12GCMCiphers = []uint16{0xc02f, 0xc02b, 0xc030, 0xc02c}
 
 var defaultRestlsScript = "250?100<1,350~100<1,600~100,300~200,300~100"
 
-const debugLog = false
+const debugLog = true
 
-func debugf(format string, a ...any) {
+func debugf(conn *Conn, format string, a ...any) {
 	if debugLog {
-		fmt.Printf(format, a...)
+		if conn != nil {
+			fmt.Printf("[%d]"+format, append([]any{conn.in.restlsPlugin.ConnId}, a...)...)
+		} else {
+			fmt.Printf(format, a...)
+		}
 	}
 }
 
@@ -228,6 +244,11 @@ func NewRestlsConfig(serverName string, password string, versionHintString strin
 	if !ok {
 		return nil, fmt.Errorf("invalid version hint: should be either tls12 or tls13")
 	}
+
+	sessionTicketsDisabled := true
+	if versionHint == TLS12Hint {
+		sessionTicketsDisabled = false
+	}
 	if len(restlsScript) == 0 {
 		restlsScript = defaultRestlsScript
 	}
@@ -237,7 +258,16 @@ func NewRestlsConfig(serverName string, password string, versionHintString strin
 	}
 	clientID := atomic.Pointer[ClientHelloID]{}
 	clientID.Store(clientIDPtr)
-	return &Config{RestlsSecret: key, VersionHint: versionHint, ServerName: serverName, RestlsScript: parseRecordScript(restlsScript), ClientSessionCache: NewLRUClientSessionCache(100), ClientID: clientID}, nil
+	return &Config{RestlsSecret: key, VersionHint: versionHint, ServerName: serverName, RestlsScript: parseRecordScript(restlsScript), ClientSessionCache: NewLRUClientSessionCache(100), ClientID: &clientID, SessionTicketsDisabled: sessionTicketsDisabled}, nil
+}
+
+func AnyTrue[T any](vals []T, predicate func(T) bool) bool {
+	for _, v := range vals {
+		if predicate(v) {
+			return true
+		}
+	}
+	return false
 }
 
 // #Restls# End

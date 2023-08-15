@@ -628,10 +628,11 @@ func xorWithMac(record []byte, mac []byte) {
 // #Restls#
 func (c *Conn) extractRestlsAppData(record []byte) ([]byte, restlsCommand, error) {
 	if recordType(record[0]) != recordTypeApplicationData {
-		debugf("extractRestlsAppData: bad recordType\n")
+		debugf(c, "recordType(record[0]) != recordTypeApplicationData\n")
 		return nil, nil, alertUnexpectedMessage
 	}
 	if len(record) < restlsAppDataOffset {
+		debugf(c, "len(record) < restlsAppDataOffset\n")
 		return nil, nil, alertBadRecordMAC
 	}
 
@@ -639,6 +640,7 @@ func (c *Conn) extractRestlsAppData(record []byte) ([]byte, restlsCommand, error
 	if c.restls12WithGCM && !c.restls12GCMServerDisableCtr {
 		nonce := binary.BigEndian.Uint64(record[recordHeaderLen:])
 		if nonce != c.restlsToClientCounter+1 {
+			debugf(c, "nonce != c.restlsToClientCounter+1\n")
 			return nil, nil, alertBadRecordMAC
 		} else {
 			header = record[:recordHeaderLen+8]
@@ -654,7 +656,7 @@ func (c *Conn) extractRestlsAppData(record []byte) ([]byte, restlsCommand, error
 	authMac := hmacAuth.Sum(nil)[:restlsAppDataMACLength]
 	for i, m := range authMac {
 		if m != record[i] {
-			debugf("extractRestlsAppData: bad authMac, expect %v, actual %v, to_server: %d, to_client: %d\n", authMac, record[:+restlsAppDataMACLength], c.restlsToServerCounter, c.restlsToClientCounter)
+			debugf(c, "extractRestlsAppData: bad authMac, expect %v, actual %v, to_server: %d, to_client: %d\n", authMac, record[:+restlsAppDataMACLength], c.restlsToServerCounter, c.restlsToClientCounter)
 			return nil, nil, alertBadRecordMAC
 		}
 	}
@@ -672,7 +674,7 @@ func (c *Conn) extractRestlsAppData(record []byte) ([]byte, restlsCommand, error
 		return nil, nil, err
 	}
 	data := record[restlsAppDataOffset : restlsAppDataOffset+dataLen]
-	debugf("extractRestlsAppData: lengthMask: %v, recordLen: %v, dataLen: %v, authMac: %v, to_server: %d, to_client: %d\n", mask, len(record), dataLen, authMac, c.restlsToServerCounter, c.restlsToClientCounter)
+	debugf(c, "extractRestlsAppData: lengthMask: %v, recordLen: %v, dataLen: %v, authMac: %v, to_server: %d, to_client: %d\n", mask, len(record), dataLen, authMac, c.restlsToServerCounter, c.restlsToClientCounter)
 	return data, command, nil
 }
 
@@ -797,20 +799,26 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 		serverRandomMac := hmac.Sum(nil)
 		recordCopy := append([]byte(nil), record...)
 		if c.restls12WithGCM && binary.BigEndian.Uint64(recordCopy[recordHeaderLen:recordHeaderLen+8]) == 0 {
+			debugf(c, "restls12WithGCM record: %v\n", recordCopy)
 			xorWithMac(recordCopy[recordHeaderLen+8:], serverRandomMac[:restlsHandshakeMACLength])
+			debugf(c, "restls12WithGCM record (recovered)): %v\n", recordCopy)
 		} else {
+			debugf(c, "restls12GCMServerDisableCtr\n")
 			c.restls12GCMServerDisableCtr = true
 			xorWithMac(recordCopy[recordHeaderLen:], serverRandomMac[:restlsHandshakeMACLength])
 		}
 
 		data, typ, err = c.in.decrypt(recordCopy)
 		if err != nil {
+			debugf(c, "restls: readRecordOrCCS auth failed, use backup cipher; serverRandomMac %v, %v\n", serverRandomMac, err)
 			c.in.cipher = backupCipher
 			data, typ, err = c.in.decrypt(record)
 		} else {
+			debugf(c, "restls: readRecordOrCCS authed\n")
 			c.restlsAuthed = true
 		}
 		c.in.nextCipher = nil
+		debugf(c, "c.handleRestlsCommand returned\n")
 	} else if handshakeComplete && c.restlsAuthed {
 		if typ == recordTypeAlert {
 			data = []byte{02, 20}
@@ -823,7 +831,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 				binary.BigEndian.PutUint64(record[recordHeaderLen:], c.restlsToClientRealRecordCounter)
 			}
 			data, typ, err = c.in.decrypt(record)
-			debugf("message from tls: %v %v %v\n", typ, data, err)
+			debugf(c, "message from tls: %v %v %v\n", typ, data, err)
 			if typ == recordTypeApplicationData {
 				data = nil
 			}
@@ -831,7 +839,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 		} else {
 			n := 0
 			if c.restlsWritePending.Swap(false) {
-				debugf("restls unblock writers, len %d\n", len(data))
+				debugf(c, "restls unblock writers, len %d\n", len(data))
 				n, err = c.Write([]byte{})
 				if err != nil {
 					fmt.Printf("n, err = c.Write([]byte{}) %v\n", err)
@@ -841,7 +849,7 @@ func (c *Conn) readRecordOrCCS(expectChangeCipherSpec bool) error {
 			c.restlsToClientCounter += 1
 			c.handleRestlsCommand(command, n > 0)
 		}
-		debugf("c.handleRestlsCommand returned\n")
+		debugf(c, "c.handleRestlsCommand returned\n")
 	} else {
 		// #Restls# End
 		data, typ, err = c.in.decrypt(record)
@@ -1392,13 +1400,13 @@ func (c *Conn) write0x17AuthHeader(paddingLen int, dataLen int, command restlsCo
 	xorWithMac(outBuf[restlsAppDataLenOffset:], mask)
 	hmacAuth := c.restlsAuthHeaderHash(false)
 	if clientFinished := c.out.restlsPlugin.takeClientFinished(); clientFinished != nil {
-		debugf("writing clientFinished %v\n", clientFinished)
+		debugf(c, "writing clientFinished %v\n", clientFinished)
 		hmacAuth.Write(clientFinished)
 	}
 	hmacAuth.Write(header)
 	hmacAuth.Write(outBuf[restlsAppDataLenOffset:]) // data len as well as the data are protected
 	authMac := hmacAuth.Sum(nil)[:restlsAppDataMACLength]
-	debugf("lengthMask: %v, authMac: %v, to_server: %d, to_client: %d\n", mask, authMac, c.restlsToServerCounter, c.restlsToClientCounter)
+	debugf(c, "lengthMask: %v, authMac: %v, to_server: %d, to_client: %d\n", mask, authMac, c.restlsToServerCounter, c.restlsToClientCounter)
 	copy(outBuf[:restlsAppDataMACLength], authMac)
 	return nil
 }
@@ -1450,7 +1458,7 @@ func (c *Conn) writeRestlsApplicationRecord(dataNew []byte) (int, error) {
 	}()
 	fakeResponse := false
 	if bytes.Equal(dataNew, restlsRandomResponseMagic) {
-		debugf("writeRestls writing random response\n")
+		debugf(c, "writeRestls writing random response\n")
 		fakeResponse = true
 		dataNew = []byte{}
 		c.restlsWritePending.Store(false)
@@ -1473,7 +1481,7 @@ func (c *Conn) writeRestlsApplicationRecord(dataNew []byte) (int, error) {
 	var n int
 	for len(data) > 0 || fakeResponse {
 		payloadLen, dataLen, paddingLen, command := c.actAccordingToScript(data)
-		debugf("writeRestls payloadLen %d, dataLen %d, paddingLen %d, command %v, dataSize %d\n", payloadLen, dataLen, paddingLen, command, len(data))
+		debugf(c, "writeRestls payloadLen %d, dataLen %d, paddingLen %d, command %v, dataSize %d\n", payloadLen, dataLen, paddingLen, command, len(data))
 		if payloadLen == 0 {
 			return 0, nil
 		}
@@ -1495,25 +1503,25 @@ func (c *Conn) writeRestlsApplicationRecord(dataNew []byte) (int, error) {
 		outBuf = append(outBuf, data[:dataLen]...)
 		var err error
 		if outBuf, err = c.writePadding(paddingLen, outBuf); err != nil {
-			debugf("writePadding failed %v", err)
+			debugf(c, "writePadding failed %v", err)
 			return n, err
 		}
 		if err = c.write0x17AuthHeader(paddingLen, dataLen, command, outBuf); err != nil {
-			debugf("write0x17AuthHeader failed %v", err)
+			debugf(c, "write0x17AuthHeader failed %v", err)
 			return n, err
 		}
 		if command.needInterrupt() && !fakeResponse {
 			c.restlsWritePending.Store(true)
 		}
 		if _, err = c.write(outBuf); err != nil {
-			debugf("writeRestls c.write failed %v", err)
+			debugf(c, "writeRestls c.write failed %v", err)
 			return n, err
 		}
 		c.restlsToServerCounter += 1
 		n += payloadLen
 		data = data[dataLen:]
 		if command.needInterrupt() && !fakeResponse {
-			debugf("restls write [%d] blocked, remaining %d\n", c.restlsToClientCounter, len(data))
+			debugf(c, "restls write [%d] blocked, remaining %d\n", c.restlsToClientCounter, len(data))
 			break
 		}
 		fakeResponse = false
@@ -1593,7 +1601,7 @@ func (c *Conn) Write(b []byte) (int, error) {
 	}
 
 	// #Restls# Begin
-	debugf("c.restlsAuthed %v\n", c.restlsAuthed)
+	debugf(c, "c.restlsAuthed %v\n", c.restlsAuthed)
 	if c.restlsAuthed {
 		n, err := c.writeRestlsApplicationRecord(b)
 		return n, c.out.setErrorLocked(err)

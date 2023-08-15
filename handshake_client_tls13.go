@@ -458,6 +458,7 @@ func (hs *clientHandshakeStateTLS13) processServerHello() error {
 
 	hs.usingPSK = true
 	c.didResume = true
+	debugf(hs.uconn.Conn, "hs.usingPSK, c.didResume\n") // #Restls#
 	c.peerCertificates = hs.session.peerCertificates
 	c.activeCertHandles = hs.session.activeCertHandles
 	c.verifiedChains = hs.session.verifiedChains
@@ -859,7 +860,7 @@ func (c *Conn) handleNewSessionTicket(msg *newSessionTicketMsgTLS13) error {
 		return errors.New("tls: received new session ticket from a client")
 	}
 
-	debugf("c.config.SessionTicketsDisabled %v || c.config.ClientSessionCache == nil %v\n", c.config.SessionTicketsDisabled, c.config.ClientSessionCache == nil) // #Restls#
+	debugf(c, "c.config.SessionTicketsDisabled %v || c.config.ClientSessionCache == nil %v\n", c.config.SessionTicketsDisabled, c.config.ClientSessionCache == nil) // #Restls#
 
 	if c.config.SessionTicketsDisabled || c.config.ClientSessionCache == nil {
 		return nil
@@ -901,6 +902,7 @@ func (c *Conn) handleNewSessionTicket(msg *newSessionTicketMsgTLS13) error {
 	cs := &ClientSessionState{ticket: msg.label, session: session}
 
 	if cacheKey := c.clientSessionCacheKey(); cacheKey != "" {
+		debugf(c, "tls 1.3 add new session") // #Restls#
 		c.config.ClientSessionCache.Put(cacheKey, cs)
 	}
 

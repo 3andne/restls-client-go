@@ -811,10 +811,10 @@ type Config struct {
 	// auto-rotation logic. See Config.ticketKeys.
 	autoSessionTicketKeys []ticketKey
 
-	RestlsSecret []byte                        // #RESTLS#
-	VersionHint  versionHint                   // #RESTLS#
-	RestlsScript []Line                        // #RESTLS#
-	ClientID     atomic.Pointer[ClientHelloID] // #RESTLS#
+	RestlsSecret []byte                         // #RESTLS#
+	VersionHint  versionHint                    // #RESTLS#
+	RestlsScript []Line                         // #RESTLS#
+	ClientID     *atomic.Pointer[ClientHelloID] // #RESTLS#
 }
 
 const (

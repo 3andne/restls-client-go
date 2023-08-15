@@ -188,7 +188,7 @@ func (c *Conn) generateSessionIDForTLS13(hello *clientHelloMsg) {
 		hmac.Write(psk.label)
 	}
 	copy(hello.sessionId[:], hmac.Sum(nil)[:restlsHandshakeMACLength])
-	debugf("generated session id: %v\n", hello.sessionId)
+	debugf(c, "generated session id for tls 1.3: %v\n", hello.sessionId) // #Restls#
 }
 
 // #Restls#
@@ -423,6 +423,7 @@ func (c *Conn) loadSession(hello *clientHelloMsg) (
 		}
 
 		hello.sessionTicket = cs.ticket
+		debugf(c, "session.version[%d] != VersionTLS13[%d]\n", session.version, VersionTLS13) // #Restls#
 		return
 	}
 
@@ -472,9 +473,12 @@ func (c *Conn) loadSession(hello *clientHelloMsg) (
 	hello.pskIdentities = []pskIdentity{identity}
 	hello.pskBinders = [][]byte{make([]byte, cipherSuite.hash.Size())}
 	// #Restls# Begin
-	if c.config.VersionHint == TLS13Hint && hello.supportedVersions[0] == VersionTLS13 {
-		c.generateSessionIDForTLS13(hello)
-	}
+	// if c.config.VersionHint == TLS13Hint && AnyTrue(hello.supportedVersions, func(v uint16) bool {
+	// 	return v == VersionTLS13
+	// }) {
+	// 	debugf(c, "session re-generated for tls 1.3\n")
+	// 	c.generateSessionIDForTLS13(hello)
+	// }
 	// #Restls# End
 
 	// Compute the PSK binders. See RFC 8446, Section 4.2.11.2.
@@ -553,6 +557,7 @@ func (hs *clientHandshakeState) handshake() error {
 	}
 	// #Restls# End
 	if isResume {
+		debugf(c, "resuming\n") // #Restls#
 		if err := hs.establishKeys(); err != nil {
 			return err
 		}
@@ -621,6 +626,7 @@ func (hs *clientHandshakeState) pickCipherSuite() error {
 
 func (hs *clientHandshakeState) doFullHandshake() error {
 	c := hs.c
+	debugf(c, "doFullHandshake()\n") // #Restls#
 
 	msg, err := c.readHandshake(&hs.finishedHash)
 	if err != nil {
@@ -741,10 +747,12 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 	}
 
 	if hs.serverHello.extendedMasterSecret {
+		debugf(c, "hs.serverHello.extendedMasterSecret\n") // #Restls#
 		c.extMasterSecret = true
 		hs.masterSecret = extMasterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret,
 			hs.finishedHash.Sum())
 	} else {
+		debugf(c, "masterFromPreMasterSecret\n") // #Restls#
 		hs.masterSecret = masterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret,
 			hs.hello.random, hs.serverHello.random)
 	}
